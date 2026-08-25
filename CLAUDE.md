@@ -32,9 +32,9 @@ On PowerShell, activate the environment with:
 
 ## Data contract
 
-The default input is `data/every_2_hours.csv`. It is intentionally ignored by
-Git because production data may be large or sensitive. Uploaded files must use
-the same logical fields:
+The default input is `data/map_1/every_2_hours.csv`. It is intentionally
+ignored by Git because production data may be large or sensitive. Uploaded
+files must use the same logical fields:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
@@ -48,7 +48,8 @@ secrets. Keep a small synthetic CSV for development and tests.
 
 ### Index dataset
 
-`data/exclusivity_index.csv` and `data/volume_index.csv` feed the second map.
+`data/map_2/exclusivity_index.csv` and `data/map_2/volume_index.csv` feed the
+second map.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
@@ -65,8 +66,8 @@ keys turn the join into a cartesian product (1.7M rows becomes 16.4M).
 
 ### Overall analysis index
 
-`data/analysis_indexed_filtered.csv` and `data/analysis_indexed.csv` feed the
-third map. Schema matches the index exports, with metric column
+`data/map_3/analysis_indexed_filtered.csv` and `data/map_3/analysis_indexed.csv`
+feed the third map. Schema matches the index exports, with metric column
 `overall_index` (finite and >= 0). Same averaging rules and no hour filter;
 the UI switches between Filtered and Full datasets rather than between metrics.
 

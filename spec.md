@@ -9,7 +9,7 @@ allow a future BigQuery data source without changing the user-facing workflow.
 
 ## 2. Current user workflow
 
-1. The app loads `data/every_2_hours.csv`, or the user uploads a CSV.
+1. The app loads `data/map_1/every_2_hours.csv`, or the user uploads a CSV.
 2. The user includes or excludes audience segments using checkboxes.
 3. The user selects an `hour_bucket` using a slider.
 4. Rows are filtered and `user_count` is summed for each `h3_id`.
@@ -98,9 +98,9 @@ rendering, segment checkboxes, basemap choice, tooltips, and map controls.
 
 A third map below the index map shows `overall_index` from one of two CSVs:
 
-- `data/analysis_indexed_filtered.csv` (Filtered) or `data/analysis_indexed.csv`
-  (Full). A radio control switches datasets; the metric is always
-  `overall_index`.
+- `data/map_3/analysis_indexed_filtered.csv` (Filtered) or
+  `data/map_3/analysis_indexed.csv` (Full). A radio control switches datasets;
+  the metric is always `overall_index`.
 - Same schema and aggregation as §4b (average duplicates, then average across
   selected segments). No `hour_bucket`; the hour slider is ignored.
 - Uses a teal-green linear sequential ramp, distinct from exclusivity (blue)
@@ -135,12 +135,15 @@ h3-analysis/
 |-- .streamlit/config.toml    # Local Streamlit defaults
 |-- .claude/launch.json       # Development launch configuration
 `-- data/
-    |-- sample.csv            # Small synthetic example
-    |-- every_2_hours.csv     # Local production export; ignored by Git
-    |-- exclusivity_index.csv # Index export; ignored by Git
-    |-- volume_index.csv      # Index export; ignored by Git
-    |-- analysis_indexed_filtered.csv  # Overall index (filtered); ignored by Git
-    `-- analysis_indexed.csv  # Overall index (full); ignored by Git
+    |-- sample.csv             # Small synthetic example
+    |-- map_1/
+    |   `-- every_2_hours.csv  # Local production export; ignored by Git
+    |-- map_2/
+    |   |-- exclusivity_index.csv  # Index export; ignored by Git
+    |   `-- volume_index.csv       # Index export; ignored by Git
+    `-- map_3/
+        |-- analysis_indexed_filtered.csv  # Overall index (filtered); ignored by Git
+        `-- analysis_indexed.csv           # Overall index (full); ignored by Git
 ```
 
 ## 7. Planned evolution

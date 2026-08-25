@@ -31,8 +31,11 @@ from h3_analysis.data import (
 st.set_page_config(page_title="H3 Analysis", page_icon="🗺️", layout="wide")
 
 DATA_DIR = "data"
-DEFAULT_FILE = f"{DATA_DIR}/every_2_hours.csv"
-INDEX_FILES = {metric: f"{DATA_DIR}/{metric}.csv" for metric in INDEX_METRICS}
+MAP_1_DIR = f"{DATA_DIR}/map_1"
+MAP_2_DIR = f"{DATA_DIR}/map_2"
+MAP_3_DIR = f"{DATA_DIR}/map_3"
+DEFAULT_FILE = f"{MAP_1_DIR}/every_2_hours.csv"
+INDEX_FILES = {metric: f"{MAP_2_DIR}/{metric}.csv" for metric in INDEX_METRICS}
 ANALYSIS_DATASETS = (
     "analysis_indexed_filtered",
     "analysis_indexed",
@@ -42,7 +45,7 @@ ANALYSIS_DATASET_LABELS = {
     "analysis_indexed": "Full",
 }
 ANALYSIS_FILES = {
-    name: f"{DATA_DIR}/{name}.csv" for name in ANALYSIS_DATASETS
+    name: f"{MAP_3_DIR}/{name}.csv" for name in ANALYSIS_DATASETS
 }
 ANALYSIS_METRIC = ANALYSIS_METRICS[0]
 UAE_LAT, UAE_LON = 24.0, 54.0
@@ -316,9 +319,9 @@ analysis_dataset = st.radio(
     key="analysis_dataset",
 )
 st.caption(
-    "Filtered uses `analysis_indexed_filtered.csv`; Full uses "
-    "`analysis_indexed.csv`. Both share the same overall index metric and "
-    "aggregation rules."
+    "Filtered uses `map_3/analysis_indexed_filtered.csv`; Full uses "
+    "`map_3/analysis_indexed.csv`. Both share the same overall index metric "
+    "and aggregation rules."
 )
 st.caption(METRIC_HELP[ANALYSIS_METRIC])
 
