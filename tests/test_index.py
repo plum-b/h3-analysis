@@ -13,8 +13,6 @@ from h3_analysis.colors import (
     ramp_for,
 )
 from h3_analysis.data import (
-    ANALYSIS_METRICS,
-    INDEX_LIKE_METRICS,
     INDEX_METRICS,
     DataValidationError,
     aggregate_index_cells,
@@ -236,99 +234,38 @@ class ColorScaleTests(unittest.TestCase):
         self.assertIn("linear-gradient", html)
 
 
-class OverallIndexValidationTests(unittest.TestCase):
-    def setUp(self):
-        self.cell = h3.latlng_to_cell(24.45, 54.38, 9)
+class ThirdMapRemovalTests(unittest.TestCase):
+    """The former CSV 'Overall analysis index' (map_3) map is gone.
 
-    def test_overall_index_is_analysis_not_map2_radio(self):
-        self.assertIn("overall_index", ANALYSIS_METRICS)
-        self.assertNotIn("overall_index", INDEX_METRICS)
-        self.assertIn("overall_index", INDEX_LIKE_METRICS)
+    ``overall_index`` still exists, but only as a Page 1 BigQuery metric with
+    its own table - never the old ``data/map_3`` CSV / radio-dataset map.
+    """
 
-    def test_overall_index_validates(self):
-        frame = pd.DataFrame(
-            {
-                "h3_id": [self.cell, self.cell],
-                "overall_index": [0.05, 12.3],
-                "segment": ["Families", "Families"],
-            }
+    def test_old_analysis_constants_are_gone(self):
+        from h3_analysis import data
+
+        self.assertFalse(hasattr(data, "ANALYSIS_METRICS"))
+        self.assertFalse(hasattr(data, "INDEX_LIKE_METRICS"))
+        self.assertFalse(hasattr(data, "REQUIRED_COLUMNS"))
+        self.assertFalse(hasattr(data, "validate_data"))
+
+    def test_overall_index_is_a_page1_bigquery_metric(self):
+        from h3_analysis import colors
+        from h3_analysis.data import PAGE1_METRICS
+
+        self.assertIn("overall_index", PAGE1_METRICS)
+        self.assertNotIn("overall_index", INDEX_METRICS)  # not a Page 2 CSV metric
+        self.assertEqual(colors.METRIC_SCALES["overall_index"], "linear")
+
+    def test_no_map_3_or_hourly_data_dir(self):
+        import os
+
+        root = os.path.dirname(os.path.dirname(__file__))
+        self.assertFalse(os.path.exists(os.path.join(root, "data", "map_3")))
+        self.assertFalse(os.path.exists(os.path.join(root, "data", "map_1")))
+        self.assertFalse(
+            os.path.exists(os.path.join(root, "pages", "3_Overall_Analysis.py"))
         )
-        result = validate_index_data(frame, "overall_index")
-        self.assertEqual(result.removed_rows, 0)
-        self.assertEqual(
-            list(result.data.columns), ["h3_id", "segment", "overall_index"]
-        )
-
-    def test_overall_index_rejects_negative_and_invalid_h3(self):
-        frame = pd.DataFrame(
-            {
-                "h3_id": [self.cell, "bad", self.cell],
-                "overall_index": [1.0, 1.0, -0.1],
-                "segment": ["Families"] * 3,
-            }
-        )
-        result = validate_index_data(frame, "overall_index")
-        self.assertEqual(len(result.data), 1)
-        self.assertEqual(result.removed_rows, 2)
-
-    def test_overall_index_missing_column(self):
-        frame = pd.DataFrame({"h3_id": [self.cell], "segment": ["Families"]})
-        with self.assertRaisesRegex(DataValidationError, "overall_index"):
-            validate_index_data(frame, "overall_index")
-
-
-class OverallIndexAggregationTests(unittest.TestCase):
-    def setUp(self):
-        self.cell = h3.latlng_to_cell(24.45, 54.38, 9)
-        self.other = h3.latlng_to_cell(25.20, 55.27, 9)
-        self.metric = "overall_index"
-
-    def test_collapse_averages_up_to_twelve_duplicates(self):
-        values = [float(i) for i in range(1, 13)]
-        frame = pd.DataFrame(
-            {
-                "h3_id": [self.cell] * 12,
-                "segment": ["Families"] * 12,
-                self.metric: values,
-            }
-        )
-        collapsed = collapse_index_duplicates(frame, self.metric)
-        self.assertEqual(len(collapsed), 1)
-        self.assertAlmostEqual(collapsed.loc[0, self.metric], 6.5)
-
-    def test_aggregate_averages_across_segments_not_sum(self):
-        frame = pd.DataFrame(
-            {
-                "h3_id": [self.cell, self.cell, self.other],
-                "segment": ["Families", "HNWI", "Families"],
-                self.metric: [2.0, 8.0, 1.0],
-            }
-        )
-        result = aggregate_index_cells(frame, ["Families", "HNWI"], self.metric)
-        cell_val = result.loc[result["h3_id"] == self.cell, self.metric].iloc[0]
-        self.assertAlmostEqual(cell_val, 5.0)
-
-
-class OverallIndexColorTests(unittest.TestCase):
-    def test_overall_index_uses_linear_scale_and_own_ramp(self):
-        from h3_analysis.colors import METRIC_RAMPS, METRIC_SCALES
-
-        self.assertEqual(METRIC_SCALES["overall_index"], "linear")
-        self.assertNotEqual(
-            METRIC_RAMPS["overall_index"], METRIC_RAMPS["exclusivity_index"]
-        )
-        self.assertNotEqual(
-            METRIC_RAMPS["overall_index"], METRIC_RAMPS["volume_index"]
-        )
-
-    def test_linear_normalize_on_typical_overall_range(self):
-        values = pd.Series([0.03, 2.0, 7.0, 65.0])
-        position = normalize(values, "overall_index")
-        self.assertTrue(position.between(0.0, 1.0).all())
-        self.assertLess(position.iloc[0], position.iloc[-1])
-
-    def test_format_value_is_decimal_not_scientific(self):
-        self.assertEqual(format_value(12.3456, "overall_index"), "12.346")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.claude
+.cursor
+.codex
+.github
+*.md
+!README.md
+.streamlit/secrets.toml
+.env
+*-service-account*.json
+gcp-key*.json
+
+# Local data exports never belong in the image; production reads BigQuery.
+# data/sample_index.csv is intentionally kept for the local dev fallback.
+data/map_2/*.csv

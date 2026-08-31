@@ -6,15 +6,16 @@ import h3
 import numpy as np
 import pandas as pd
 
-REQUIRED_COLUMNS = ("h3_id", "hour_bucket", "segment", "user_count")
-VALID_HOUR_BUCKETS = tuple(range(0, 24, 2))
+# Page 1 (BigQuery) shows one of these index metrics, each from its own table.
+# Schema per table: h3_id, segment, <the metric column>. No hour column.
+PAGE1_METRICS = ("overall_index", "volume_index", "exclusivity_index")
 
-# The index exports carry no hour column, so they are analysed on their own map.
+# Page 2 local-CSV index exports also carry no hour column.
 INDEX_METRICS = ("exclusivity_index", "volume_index")
-# Overall/analysis index uses the same schema and aggregation as the index maps.
-ANALYSIS_METRICS = ("overall_index",)
-INDEX_LIKE_METRICS = INDEX_METRICS + ANALYSIS_METRICS
 INDEX_BASE_COLUMNS = ("h3_id", "segment")
+
+# Every metric that shares the h3_id/segment/<metric> index schema.
+ALL_INDEX_METRICS = tuple(dict.fromkeys(PAGE1_METRICS + INDEX_METRICS))
 
 
 class DataValidationError(ValueError):
@@ -40,49 +41,32 @@ def _valid_h3_mask(values: pd.Series) -> pd.Series:
     return values.map(lookup).fillna(False).astype(bool)
 
 
-def validate_data(frame: pd.DataFrame) -> ValidationResult:
-    """Validate and normalize an uploaded H3 data frame."""
-    missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
+def validate_aggregated_cells(
+    frame: pd.DataFrame, value_column: str
+) -> ValidationResult:
+    """Validate an already-aggregated ``h3_id``/value frame.
+
+    Page 1 aggregates in BigQuery, so the app only needs to confirm the two
+    expected columns are present, coerce the value to a non-negative number, and
+    drop rows whose ``h3_id`` is not a real H3 index before mapping them.
+    """
+    required = ("h3_id", value_column)
+    missing = [column for column in required if column not in frame.columns]
     if missing:
         raise DataValidationError("Missing required columns: " + ", ".join(missing))
 
-    data = frame.loc[:, REQUIRED_COLUMNS].copy()
+    data = frame.loc[:, list(required)].copy()
     data["h3_id"] = data["h3_id"].astype("string").str.strip()
-    data["segment"] = data["segment"].astype("string").str.strip()
-    data["hour_bucket"] = pd.to_numeric(data["hour_bucket"], errors="coerce")
-    data["user_count"] = pd.to_numeric(data["user_count"], errors="coerce")
+    data[value_column] = pd.to_numeric(data[value_column], errors="coerce")
 
-    valid_h3 = _valid_h3_mask(data["h3_id"])
     valid_rows = (
-        valid_h3
-        & data["hour_bucket"].isin(VALID_HOUR_BUCKETS)
-        & data["segment"].notna()
-        & data["segment"].ne("")
-        & data["user_count"].notna()
-        & data["user_count"].ge(0)
+        _valid_h3_mask(data["h3_id"])
+        & np.isfinite(data[value_column])
+        & data[value_column].ge(0)
     )
-
     removed_rows = int((~valid_rows).sum())
     data = data.loc[valid_rows].copy()
-    if data.empty:
-        raise DataValidationError("The CSV contains no valid data rows.")
-
-    data["hour_bucket"] = data["hour_bucket"].astype(int)
     return ValidationResult(data=data, removed_rows=removed_rows)
-
-
-def aggregate_cells(
-    frame: pd.DataFrame, selected_segments: list[str], selected_hour: int
-) -> pd.DataFrame:
-    """Filter the selected slice and sum counts for duplicate H3 cells."""
-    return (
-        frame[
-            frame["segment"].isin(selected_segments)
-            & frame["hour_bucket"].eq(selected_hour)
-        ]
-        .groupby("h3_id", as_index=False, sort=True)["user_count"]
-        .sum()
-    )
 
 
 def validate_index_data(frame: pd.DataFrame, metric: str) -> ValidationResult:
@@ -92,10 +76,10 @@ def validate_index_data(frame: pd.DataFrame, metric: str) -> ValidationResult:
     file that carries several index columns is also accepted, so a future export
     combining them needs no code change.
     """
-    if metric not in INDEX_LIKE_METRICS:
+    if metric not in ALL_INDEX_METRICS:
         raise DataValidationError(
             f"Unknown metric '{metric}'. Expected one of: "
-            + ", ".join(INDEX_LIKE_METRICS)
+            + ", ".join(ALL_INDEX_METRICS)
         )
 
     required = (*INDEX_BASE_COLUMNS, metric)
@@ -145,9 +129,4 @@ def aggregate_index_cells(
     """Average the metric across the selected segments for each H3 cell."""
     selected = frame[frame["segment"].isin(selected_segments)]
     return selected.groupby("h3_id", as_index=False, sort=True)[metric].mean()
-
-
-def format_hour_bucket(hour: int) -> str:
-    """Return a human-readable label for a two-hour bucket."""
-    return f"{hour:02d}:00-{(hour + 2) % 24:02d}:00"
 

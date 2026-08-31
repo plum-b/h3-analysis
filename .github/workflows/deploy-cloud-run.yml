@@ -1,0 +1,67 @@
+name: Deploy to Cloud Run
+
+# Deploys the Streamlit app to Cloud Run using GitHub -> Google Cloud Workload
+# Identity Federation. No service-account JSON key is stored in the repository.
+#
+# Configure these as repository or environment **Variables** (Settings ->
+# Secrets and variables -> Actions -> Variables) - they are identifiers, not
+# secrets:
+#   GCP_PROJECT_ID              e.g. my-proj-123
+#   GCP_REGION                  e.g. europe-west1
+#   GCP_WORKLOAD_IDENTITY_PROVIDER
+#     projects/<NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>
+#   GCP_DEPLOY_SERVICE_ACCOUNT  deployer@my-proj-123.iam.gserviceaccount.com
+#   CLOUD_RUN_SERVICE           e.g. h3-analysis
+#   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT
+#     h3-analysis-run@my-proj-123.iam.gserviceaccount.com
+#   BIGQUERY_PROJECT_ID              e.g. maddictdata
+#   BIGQUERY_DATASET                 e.g. OOH_Analysis
+#   BIGQUERY_OVERALL_INDEX_TABLE     e.g. h3_analysis_indexed_filtered
+#   BIGQUERY_VOLUME_INDEX_TABLE      e.g. h3_analysis_volume_index_filtered
+#   BIGQUERY_EXCLUSIVITY_INDEX_TABLE e.g. h3_analysis_exclusivity_index_filtered
+#   ARTIFACT_REGISTRY_REPO      e.g. containers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required for Workload Identity Federation
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ vars.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY_REPO }}/${{ vars.CLOUD_RUN_SERVICE }}:${GITHUB_SHA}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${{ vars.CLOUD_RUN_SERVICE }}" \
+            --image "$IMAGE" \
+            --region "${{ vars.GCP_REGION }}" \
+            --service-account "${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}" \
+            --no-allow-unauthenticated \
+            --ingress internal-and-cloud-load-balancing \
+            --set-env-vars "^@@^BIGQUERY_PROJECT_ID=${{ vars.BIGQUERY_PROJECT_ID }}@@BIGQUERY_DATASET=${{ vars.BIGQUERY_DATASET }}@@BIGQUERY_OVERALL_INDEX_TABLE=${{ vars.BIGQUERY_OVERALL_INDEX_TABLE }}@@BIGQUERY_VOLUME_INDEX_TABLE=${{ vars.BIGQUERY_VOLUME_INDEX_TABLE }}@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=${{ vars.BIGQUERY_EXCLUSIVITY_INDEX_TABLE }}"

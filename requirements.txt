@@ -2,3 +2,6 @@ streamlit
 pandas
 pydeck
 h3
+google-cloud-bigquery
+google-auth
+db-dtypes

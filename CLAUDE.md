@@ -2,10 +2,35 @@
 
 ## Project purpose
 
-This repository contains a Streamlit application for exploring time-bucketed H3
-data on a map, initially focused on the UAE. The app reads a local CSV or a CSV
-uploaded through the sidebar, filters it by audience segment and two-hour bucket,
-aggregates the metric by H3 cell, and displays the result with PyDeck.
+This repository contains a Streamlit application for exploring H3 audience data
+on a map, focused on the UAE. It has **exactly two map pages**, each on its own
+Streamlit page because they use different data and analysis logic:
+
+- **Page 1 — `app.py` — index-analysis map.** Filters by audience segment only
+  (no time column). A radio switches the metric between `overall_index`,
+  `volume_index` and `exclusivity_index`; each metric is a **separate BigQuery
+  table** with schema `h3_id` / `segment` / `<metric>`; each `(h3_id, segment)`
+  pair is **repeated** (~8x on the live tables, unevenly). The map averages in
+  **two steps**: within each pair, then across the selected segments. **Data source is BigQuery.** A local CSV (upload or the
+  synthetic `data/sample_index.csv`) exists only as an explicit development
+  fallback; production never reads a production CSV.
+- **Page 2 — `pages/2_Index_Analysis.py` — index-analysis map (day-part
+  placeholder).** Segment filter only; metric switches `exclusivity_index` /
+  `volume_index`. Reads local CSVs (`data/map_2/` or `data/sample_index.csv`).
+
+Never show two maps on one page. Index values are **averaged, never summed**.
+Never join the metric tables/files on `h3_id` + `segment`.
+
+### Current phase and future plan
+
+- Immediate implementation: BigQuery for **Page 1 only** (the three
+  `*_filtered` index tables).
+- Future: migrate Page 2 to its own three BigQuery tables that add a day-part
+  (morning / noon / evening / …) dimension, giving Page 2 a time-of-day filter.
+  Add further tables/pages only when their approved schema and purpose are
+  provided. The former CSV "Overall analysis index" (`data/map_3`) map and the
+  hourly `user_count` map have been **removed**; `overall_index` now exists only
+  as a Page 1 BigQuery metric.
 
 ## Runtime
 
@@ -14,6 +39,7 @@ aggregates the metric by H3 cell, and displays the result with PyDeck.
 - pandas for loading, filtering, and aggregating data
 - h3 for H3 validation and cell centroids
 - pydeck/deck.gl for map rendering
+- google-cloud-bigquery for the Page 1 production data source (ADC only)
 
 Run the app from the repository root:
 
@@ -32,55 +58,100 @@ On PowerShell, activate the environment with:
 
 ## Data contract
 
-The default input is `data/map_1/every_2_hours.csv`. It is intentionally
-ignored by Git because production data may be large or sensitive. Uploaded
-files must use the same logical fields:
+### Page 1 — BigQuery (three index tables)
+
+Production reads configuration-driven fully qualified BigQuery tables, one per
+metric. Never hard-code a project id, dataset, table, credentials, or SQL
+filter values.
+
+| Env var | Meaning |
+| --- | --- |
+| `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` | shared project + dataset |
+| `BIGQUERY_OVERALL_INDEX_TABLE` | table for `overall_index` |
+| `BIGQUERY_VOLUME_INDEX_TABLE` | table for `volume_index` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | table for `exclusivity_index` |
+| `BIGQUERY_<METRIC>_TABLE_FQN` | optional per-metric full-FQN override |
+| `H3_DATA_SOURCE=local` | default the sidebar to the local CSV fallback |
+
+Current values live in the committed `.env.example` (project `maddictdata`,
+dataset `OOH_Analysis`, tables `h3_analysis_indexed_filtered`,
+`h3_analysis_volume_index_filtered`, `h3_analysis_exclusivity_index_filtered`).
+Developers `cp .env.example .env`; `h3_analysis/config.py` loads that file
+without overriding real environment variables. `.env` is Git-ignored and holds
+identifiers only — never credentials.
+
+Each table's columns:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `h3_id` | string | Valid H3 cell index |
-| `hour_bucket` | integer | Start hour of a two-hour bucket: 0, 2, ..., 22 |
-| `segment` | string | Audience/category used by the checkboxes |
-| `user_count` | numeric | Metric aggregated by H3 cell |
+| `h3_id` | STRING | Valid H3 cell index |
+| `segment` | STRING | Audience/category used by the checkboxes |
+| `<metric>` | numeric ≥ 0 | Column named exactly `overall_index` / `volume_index` / `exclusivity_index` |
+
+There is **no time / hour column**. Each `(h3_id, segment)` pair is **repeated**
+— ~8.4 rows per pair on the live tables, and the count varies by pair, so the
+duplication is uneven.
+
+Rules:
+
+- The segment filter is always passed as a query parameter
+  (`@segments` ARRAY<STRING>). Never interpolate a user-controlled value into
+  SQL. Only the validated table FQN and the metric name (checked against
+  `PAGE1_METRICS`) reach the SQL text.
+- Aggregate in BigQuery in **two steps**: `AVG` grouped by `(h3_id, segment)` in
+  a CTE, then `AVG` of that grouped by `h3_id`. Never collapse this into one
+  `AVG ... GROUP BY h3_id` — that is a weighted average dominated by whichever
+  pair carries more duplicate rows; measured on the live tables it changed 48.6%
+  of cells, by up to 108% relative. Return only `h3_id` and the metric.
+- Cache query results with `st.cache_data` keyed by table FQN + metric +
+  segments.
+- Credentials: Application Default Credentials only. Local dev uses
+  `gcloud auth application-default login`; Cloud Run uses its attached service
+  account. Never commit a service-account JSON key.
+- Show an actionable in-app message when config or permissions are missing.
+
+### Page 1 — local development fallback
+
+The committed synthetic `data/sample_index.csv` (columns `h3_id`, `segment`,
+`overall_index`, `volume_index`, `exclusivity_index`), or a sidebar CSV upload
+with `h3_id`, `segment` and the active metric column. Production must not depend
+on a production CSV.
 
 Never commit production exports, credentials, personal data, or Streamlit
-secrets. Keep a small synthetic CSV for development and tests.
+secrets.
 
-### Index dataset
+### Page 2 — Index dataset (local CSV)
 
 `data/map_2/exclusivity_index.csv` and `data/map_2/volume_index.csv` feed the
-second map.
+second page.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
 | `h3_id` | string | Valid H3 cell index |
-| `segment` | string | Same audience values as the hourly export |
+| `segment` | string | Audience values shared with Page 1 |
 | `exclusivity_index` or `volume_index` | numeric | Finite and >= 0 |
 
-These files have **no `hour_bucket` column**, so the second map has no time
-filter. Each cell/segment pair repeats up to twelve times — the count of
-two-hour buckets — with nothing to distinguish the rows, so the values are
-averaged rather than summed; summing would push a normalized index outside its
-range. Do not join the two index files on `h3_id` and `segment`: the duplicate
-keys turn the join into a cartesian product (1.7M rows becomes 16.4M).
-
-### Overall analysis index
-
-`data/map_3/analysis_indexed_filtered.csv` and `data/map_3/analysis_indexed.csv`
-feed the third map. Schema matches the index exports, with metric column
-`overall_index` (finite and >= 0). Same averaging rules and no hour filter;
-the UI switches between Filtered and Full datasets rather than between metrics.
+`data/sample_index.csv` also satisfies this contract. These files have **no time
+column**. A cell/segment pair may repeat with nothing to distinguish the rows,
+so values are averaged (`collapse_index_duplicates`) rather than summed; summing
+would push a normalized index outside its range. Do not join the index files on
+`h3_id` and `segment`: the duplicate keys turn the join into a cartesian
+product (1.7M rows becomes 16.4M).
 
 ## Implementation conventions
 
-- Keep `app.py` as the entry point.
-- Put reusable data validation, transformation, and map helpers into small
-  modules if `app.py` grows substantially.
+- Keep `app.py` as the entry point and Page 1. Additional pages live in
+  `pages/`.
+- Reusable data-access and helper logic lives outside the UI:
+  `h3_analysis/bigquery_source.py` (Streamlit-free, unit tested),
+  `h3_analysis/data.py` (validation/aggregation),
+  `h3_analysis/colors.py`, `h3_analysis/mapping.py` (shared PyDeck rendering).
 - Cache file loading and expensive transformations with `st.cache_data` when
   appropriate.
-- Validate required columns, numeric values, hour buckets, and H3 indexes before
-  rendering; show actionable Streamlit errors instead of raw tracebacks.
-- Aggregate `user_count` after all active filters are applied.
+- Validate required columns, numeric values, and H3 indexes before rendering;
+  show actionable Streamlit errors instead of raw tracebacks.
+- Aggregate the metric (`AVG`) after the segment filter is applied; never sum
+  index values.
 - Preserve the UAE fallback center, but derive the normal map center from the
   currently displayed H3 cells.
 - Do not add a map-provider token to source code. Use `.streamlit/secrets.toml`
@@ -92,13 +163,19 @@ the UI switches between Filtered and Full datasets rather than between metrics.
 
 Before considering a change complete:
 
-1. Run a Python syntax check or test suite.
-2. Start the Streamlit app with the synthetic sample data.
-3. Confirm every segment checkbox works.
-4. Confirm all hour buckets can be selected.
+0. When BigQuery behaviour changed, run `python3 scripts/check_bigquery.py`
+   (needs `gcloud auth application-default login`).
+1. Run a Python syntax check and the test suite
+   (`python3 -m unittest discover -s tests`).
+2. Start the Streamlit app with the synthetic local fallback
+   (`H3_DATA_SOURCE=local`).
+3. Confirm every segment checkbox works on both pages.
+4. Confirm the Page 1 metric radio switches between all three index metrics.
 5. Confirm H3 cells appear in the UAE and tooltips show the correct values.
 6. Confirm each basemap option visibly changes the map and browser/server logs
    contain no new errors.
+7. Confirm Page 1 shows an actionable error (not a traceback) when BigQuery
+   config or permissions are missing.
 
 ## Project subagents
 

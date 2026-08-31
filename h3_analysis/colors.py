@@ -5,9 +5,9 @@ measure different things and must never be read against a shared scale.
 The ramps follow the project's sequential-color rule: one hue per magnitude
 encoding, stepped monotonically in lightness.
 
-``exclusivity_index`` and ``overall_index`` use a linear scale.
-``volume_index`` spans roughly four orders of magnitude, so a linear scale would
-collapse almost every cell onto the lightest step; it uses a log scale instead.
+``exclusivity_index`` and ``overall_index`` use a linear scale. ``volume_index``
+spans roughly four orders of magnitude, so a linear scale would collapse almost
+every cell onto the lightest step; it uses a log scale instead.
 """
 
 from __future__ import annotations
@@ -28,32 +28,36 @@ ORANGE_RAMP = (
     "#c94908", "#b44005", "#9f3600", "#8a2e00", "#752600", "#621e00",
 )
 
-# Teal-green ramp for the overall/analysis index; same lightness profile as the
-# other sequential ramps so the third map reads as an equal peer.
+# Teal-green ramp for the overall index; same lightness profile as the others
+# so the three metrics read as equal peers.
 TEAL_GREEN_RAMP = (
     "#c5ebe3", "#addfd5", "#94d3c6", "#7cc7b8", "#63bbaa", "#4bae9b", "#32a28d",
     "#2a917e", "#257f6f", "#1f6d60", "#1a5c50", "#144b41", "#0f3a32",
 )
 
 METRIC_RAMPS = {
+    "overall_index": TEAL_GREEN_RAMP,
     "exclusivity_index": BLUE_RAMP,
     "volume_index": ORANGE_RAMP,
-    "overall_index": TEAL_GREEN_RAMP,
 }
 
 METRIC_SCALES = {
+    "overall_index": "linear",
     "exclusivity_index": "linear",
     "volume_index": "log",
-    "overall_index": "linear",
 }
 
 METRIC_LABELS = {
+    "overall_index": "Overall index",
     "exclusivity_index": "Exclusivity index",
     "volume_index": "Volume index",
-    "overall_index": "Overall index",
 }
 
 METRIC_HELP = {
+    "overall_index": (
+        "A combined overall score for each cell and segment. Higher means a "
+        "stronger overall signal for that audience in the cell."
+    ),
     "exclusivity_index": (
         "How concentrated a segment is in a cell relative to its overall "
         "presence. Higher means the cell is more distinctive for that segment."
@@ -61,10 +65,6 @@ METRIC_HELP = {
     "volume_index": (
         "The share of a segment's total activity that falls in a cell. Higher "
         "means more of the segment's volume is here."
-    ),
-    "overall_index": (
-        "A combined overall score for each cell and segment. Higher means a "
-        "stronger overall signal for that audience in the cell."
     ),
 }
 

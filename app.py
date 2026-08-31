@@ -1,13 +1,34 @@
+"""Page 1 - Index analysis map (BigQuery).
+
+Page 1 shows one index metric at a time - Overall, Volume or Exclusivity - each
+stored in its own BigQuery table with the schema ``h3_id`` / ``segment`` /
+``<metric>`` and no hour column. Each ``(h3_id, segment)`` pair is repeated, so
+the map averages within each pair first and then across the selected segments
+(BigQuery does both steps).
+
+Production reads BigQuery. A local CSV (uploaded, or the committed synthetic
+``data/sample_index.csv`` that carries all three metric columns) is an explicit
+development fallback; production does not depend on a production CSV.
+
+Page 2 (``pages/2_Index_Analysis.py``) is the local-CSV index map and will later
+become the day-part (morning / noon / evening) BigQuery version. See README.
+"""
+
 from __future__ import annotations
 
 import io
 import os
 
-import h3
 import pandas as pd
-import pydeck as pdk
 import streamlit as st
 
+from h3_analysis.bigquery_source import (
+    BigQueryConfigError,
+    build_index_query,
+    build_segments_query,
+    index_table_fqn,
+    run_query,
+)
 from h3_analysis.colors import (
     METRIC_HELP,
     METRIC_LABELS,
@@ -15,71 +36,46 @@ from h3_analysis.colors import (
     format_value,
     legend_html,
 )
+from h3_analysis.config import load_local_env
 from h3_analysis.data import (
-    ANALYSIS_METRICS,
-    INDEX_METRICS,
+    PAGE1_METRICS,
     DataValidationError,
     ValidationResult,
-    aggregate_cells,
     aggregate_index_cells,
     collapse_index_duplicates,
-    format_hour_bucket,
-    validate_data,
+    validate_aggregated_cells,
     validate_index_data,
 )
+from h3_analysis.mapping import BASEMAP_OPTIONS, basemap_style, render_h3_map
 
-st.set_page_config(page_title="H3 Analysis", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="H3 Analysis - Index", page_icon="🗺️", layout="wide")
 
-DATA_DIR = "data"
-MAP_1_DIR = f"{DATA_DIR}/map_1"
-MAP_2_DIR = f"{DATA_DIR}/map_2"
-MAP_3_DIR = f"{DATA_DIR}/map_3"
-DEFAULT_FILE = f"{MAP_1_DIR}/every_2_hours.csv"
-INDEX_FILES = {metric: f"{MAP_2_DIR}/{metric}.csv" for metric in INDEX_METRICS}
-ANALYSIS_DATASETS = (
-    "analysis_indexed_filtered",
-    "analysis_indexed",
-)
-ANALYSIS_DATASET_LABELS = {
-    "analysis_indexed_filtered": "Filtered",
-    "analysis_indexed": "Full",
-}
-ANALYSIS_FILES = {
-    name: f"{MAP_3_DIR}/{name}.csv" for name in ANALYSIS_DATASETS
-}
-ANALYSIS_METRIC = ANALYSIS_METRICS[0]
-UAE_LAT, UAE_LON = 24.0, 54.0
+# Local-development convenience; deployed environments inject the real vars.
+load_local_env()
+
+LOCAL_SAMPLE_FILE = "data/sample_index.csv"
+
+SOURCE_BIGQUERY = "BigQuery (production)"
+SOURCE_LOCAL = "Local CSV (development)"
 
 
-@st.cache_data(show_spinner="Loading and validating H3 data...")
-def load_local_data(path: str, modified_ns: int):
-    """Load and validate a local CSV, refreshing only when the file changes."""
-    del modified_ns
-    return validate_data(pd.read_csv(path))
+@st.cache_data(show_spinner="Reading available segments from BigQuery...")
+def load_segments(table_fqn: str) -> list[str]:
+    frame = run_query(build_segments_query(table_fqn))
+    return sorted(frame["segment"].dropna().astype(str).unique())
 
 
-@st.cache_data(show_spinner="Loading and validating uploaded CSV...")
-def load_uploaded_data(contents: bytes):
-    return validate_data(pd.read_csv(io.BytesIO(contents)))
+@st.cache_data(show_spinner="Querying the index from BigQuery...")
+def load_bigquery_cells(
+    table_fqn: str, metric: str, segments: tuple[str, ...]
+) -> pd.DataFrame:
+    sql, params = build_index_query(table_fqn, metric, list(segments))
+    return run_query(sql, params)
 
 
-def load_source():
-    uploaded = st.sidebar.file_uploader("Upload CSV", type="csv")
-    if uploaded is not None:
-        return load_uploaded_data(uploaded.getvalue()), uploaded.name
-    if os.path.exists(DEFAULT_FILE):
-        modified_ns = os.stat(DEFAULT_FILE).st_mtime_ns
-        return load_local_data(DEFAULT_FILE, modified_ns), DEFAULT_FILE
-    st.info("Upload a CSV containing H3 cells to get started.")
-    st.stop()
-
-
-@st.cache_data(show_spinner="Loading and validating index data...")
-def load_index_data(path: str, metric: str, modified_ns: int) -> ValidationResult:
-    """Load one index export, keeping only the columns this metric needs."""
-    del modified_ns
-    wanted = {"h3_id", "segment", metric}
-    frame = pd.read_csv(path, usecols=lambda column: column in wanted)
+@st.cache_data(show_spinner="Loading and validating local CSV...")
+def load_local_index(contents: bytes, metric: str) -> ValidationResult:
+    frame = pd.read_csv(io.BytesIO(contents))
     result = validate_index_data(frame, metric)
     return ValidationResult(
         data=collapse_index_duplicates(result.data, metric),
@@ -87,331 +83,209 @@ def load_index_data(path: str, metric: str, modified_ns: int) -> ValidationResul
     )
 
 
-def render_h3_map(frame: pd.DataFrame, fill_color, tooltip_text: str, style: str) -> None:
-    """Render one H3 layer. Shared by all maps so they stay consistent."""
-    layer = pdk.Layer(
-        "H3HexagonLayer",
-        frame,
-        get_hexagon="h3_id",
-        get_fill_color=fill_color,
-        pickable=True,
-        opacity=0.65,
-        # Flat cells: colour alone carries the value, no extrusion.
-        extruded=False,
-        stroked=False,
-    )
-    latitude, longitude = map_center(frame)
-    view_state = pdk.ViewState(
-        latitude=latitude, longitude=longitude, zoom=7.5, pitch=0, bearing=0
-    )
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            map_style=style,
-            tooltip={"text": tooltip_text},
-        ),
-        width="stretch",
-    )
+_FALLBACK_HINT = (
+    "To keep working offline, switch the sidebar data source to "
+    f"“{SOURCE_LOCAL}”."
+)
 
 
-def map_center(frame: pd.DataFrame) -> tuple[float, float]:
-    if frame.empty:
-        return UAE_LAT, UAE_LON
-    centers = frame["h3_id"].map(h3.cell_to_latlng)
-    return (
-        sum(center[0] for center in centers) / len(centers),
-        sum(center[1] for center in centers) / len(centers),
+def _config_error(message: str) -> None:
+    """Configuration is missing or malformed - point at the env vars."""
+    st.error(
+        f"**BigQuery is not configured.**\n\n{message}\n\n"
+        "Copy the template and adjust it if the tables have moved:\n"
+        "```bash\ncp .env.example .env\n```\n"
+        f"{_FALLBACK_HINT}"
     )
+    st.stop()
+
+
+def _access_error(table_fqn: str, error: Exception) -> None:
+    """Configuration resolved but the query failed - credentials or IAM."""
+    detail = str(error)
+    if "invalid_grant" in detail or "credential" in detail.lower():
+        remedy = (
+            "Your Application Default Credentials are missing or expired. "
+            "Re-authenticate:\n"
+            "```bash\ngcloud auth application-default login\n```"
+        )
+    else:
+        remedy = (
+            "Check IAM: the account needs `roles/bigquery.jobUser` on the "
+            "project and `roles/bigquery.dataViewer` on the dataset. Verify "
+            "with:\n```bash\npython3 scripts/check_bigquery.py\n```"
+        )
+    st.error(
+        f"**Cannot read `{table_fqn}`.**\n\n{detail}\n\n{remedy}\n\n"
+        f"{_FALLBACK_HINT}"
+    )
+    st.stop()
+
+
+def segment_checkboxes(segment_values: list[str]) -> list[str]:
+    st.sidebar.subheader("Segments")
+    select_all = st.sidebar.checkbox("Select all", value=True)
+    selected = [
+        segment
+        for segment in segment_values
+        if st.sidebar.checkbox(
+            segment, value=select_all, key=f"segment_{select_all}_{segment}"
+        )
+    ]
+    if not selected:
+        st.warning("Select at least one segment to display the map.")
+        st.stop()
+    return selected
+
+
+def bigquery_frame(metric: str) -> tuple[pd.DataFrame, list[str], str]:
+    try:
+        table_fqn = index_table_fqn(metric)
+    except BigQueryConfigError as error:
+        _config_error(str(error))
+
+    st.sidebar.caption(f"Data source: BigQuery `{table_fqn}`")
+
+    try:
+        segment_values = load_segments(table_fqn)
+    except BigQueryConfigError as error:
+        _config_error(str(error))
+    except Exception as error:  # google.auth / api_core errors
+        _access_error(table_fqn, error)
+
+    if not segment_values:
+        st.warning("The BigQuery table returned no segments.")
+        st.stop()
+
+    selected_segments = segment_checkboxes(segment_values)
+    try:
+        raw = load_bigquery_cells(table_fqn, metric, tuple(selected_segments))
+    except Exception as error:
+        _access_error(table_fqn, error)
+    validation = validate_aggregated_cells(raw, metric)
+    if validation.removed_rows:
+        st.warning(
+            f"Excluded {validation.removed_rows:,} row(s) with an invalid H3 "
+            f"index or {metric} value returned by BigQuery."
+        )
+    return validation.data, selected_segments, f"BigQuery `{table_fqn}`"
+
+
+def local_frame(metric: str) -> tuple[pd.DataFrame, list[str], str]:
+    uploaded = st.sidebar.file_uploader("Upload index CSV", type="csv")
+    if uploaded is not None:
+        contents, source_name = uploaded.getvalue(), uploaded.name
+    elif os.path.exists(LOCAL_SAMPLE_FILE):
+        with open(LOCAL_SAMPLE_FILE, "rb") as handle:
+            contents = handle.read()
+        source_name = f"{LOCAL_SAMPLE_FILE} (synthetic)"
+    else:
+        st.info(
+            "Upload a CSV with `h3_id`, `segment` and a metric column to use "
+            "the local fallback."
+        )
+        st.stop()
+
+    st.sidebar.caption(f"Data source: {source_name}")
+    validation = load_local_index(contents, metric)
+    if validation.removed_rows:
+        st.warning(
+            f"Excluded {validation.removed_rows:,} invalid row(s). "
+            "Check H3 indexes, segments, and metric values."
+        )
+
+    data = validation.data
+    segment_values = sorted(data["segment"].unique().tolist())
+    selected_segments = segment_checkboxes(segment_values)
+    aggregated = aggregate_index_cells(data, selected_segments, metric)
+    return aggregated, selected_segments, source_name
 
 
 st.title("H3 Grid Analysis - UAE")
-st.caption("Explore audience activity by location, segment, and two-hour period.")
+st.caption(
+    "Page 1 of 2. Index analysis by location and audience segment. "
+    "These datasets carry no hour column, so this page has no time filter."
+)
+
+metric = st.radio(
+    "Index metric",
+    PAGE1_METRICS,
+    format_func=lambda name: METRIC_LABELS[name],
+    horizontal=True,
+    key="page1_metric",
+)
+st.caption(METRIC_HELP[metric])
+
+default_source = (
+    SOURCE_LOCAL
+    if os.environ.get("H3_DATA_SOURCE", "").strip().lower() == "local"
+    else SOURCE_BIGQUERY
+)
+source_mode = st.sidebar.radio(
+    "Data source",
+    (SOURCE_BIGQUERY, SOURCE_LOCAL),
+    index=0 if default_source == SOURCE_BIGQUERY else 1,
+    help="Production uses BigQuery. The local CSV is a development fallback only.",
+)
 
 try:
-    validation, source_name = load_source()
+    if source_mode == SOURCE_BIGQUERY:
+        cells, selected_segments, source_name = bigquery_frame(metric)
+    else:
+        cells, selected_segments, source_name = local_frame(metric)
 except (DataValidationError, pd.errors.ParserError, UnicodeDecodeError) as error:
-    st.error(f"Unable to use this CSV: {error}")
+    st.error(f"Unable to use this data source: {error}")
     st.stop()
 
-data = validation.data
-st.sidebar.caption(f"Data source: {source_name}")
-if validation.removed_rows:
-    st.warning(
-        f"Excluded {validation.removed_rows:,} invalid row(s). "
-        "Check H3 indexes, hour buckets, segments, and user counts."
-    )
+map_style = st.radio("Basemap", BASEMAP_OPTIONS, horizontal=True, key="basemap")
+style_url = basemap_style(map_style)
 
-st.sidebar.subheader("Segments")
-segment_values = sorted(data["segment"].unique().tolist())
-select_all = st.sidebar.checkbox("Select all", value=True)
-selected_segments = [
-    segment
-    for segment in segment_values
-    if st.sidebar.checkbox(
-        segment, value=select_all, key=f"segment_{select_all}_{segment}"
-    )
-]
+st.subheader(f"{METRIC_LABELS[metric]} by H3 cell")
 
-if not selected_segments:
-    st.warning("Select at least one segment to display the map.")
+if cells.empty:
+    st.info("No H3 cells match the selected segments.")
+    render_h3_map(cells, "[255, 200, 100]", "", style_url)
     st.stop()
 
-hour_values = sorted(data["hour_bucket"].unique().tolist())
-selected_hour = st.select_slider(
-    "Two-hour period",
-    options=hour_values,
-    value=hour_values[0],
-    format_func=format_hour_bucket,
+values = cells[metric]
+cells = cells.assign(
+    fill_color=colors_for(values, metric, map_style == "Dark"),
+    metric_label=[format_value(value, metric) for value in values],
 )
 
-filtered = aggregate_cells(data, selected_segments, selected_hour)
-period_label = format_hour_bucket(selected_hour)
-
-total_users = filtered["user_count"].sum()
-metric_columns = st.columns(4)
-metric_columns[0].metric("Users", f"{total_users:,.0f}")
-metric_columns[1].metric("Visible H3 cells", f"{len(filtered):,}")
-metric_columns[2].metric("Segments", f"{len(selected_segments):,}")
-metric_columns[3].metric("Period", period_label)
-
-st.subheader(f"User count by H3 cell - {period_label}")
-
-map_style = st.radio(
-    "Basemap", ["Dark", "Street Map"], horizontal=True, key="basemap"
+summary_columns = st.columns(4)
+summary_columns[0].metric("Visible H3 cells", f"{len(cells):,}")
+summary_columns[1].metric("Segments", f"{len(selected_segments):,}")
+summary_columns[2].metric(
+    "Median", format_value(float(values.median()), metric)
 )
-style_url = (
-    pdk.map_styles.DARK if map_style == "Dark" else pdk.map_styles.CARTO_ROAD
+summary_columns[3].metric(
+    "Maximum", format_value(float(values.max()), metric)
 )
 
-if filtered.empty:
-    st.info("No H3 cells match the current filters.")
-else:
-    max_value = max(float(filtered["user_count"].max()), 1.0)
-    render_h3_map(
-        filtered,
-        f"[255, 255 * (1 - user_count / {max_value}), 100]",
-        "H3: {h3_id}\nUsers: {user_count}",
-        style_url,
-    )
-    st.caption("Color scale: yellow indicates lower counts; red indicates higher counts.")
+render_h3_map(
+    cells,
+    "fill_color",
+    f"H3: {{h3_id}}\n{METRIC_LABELS[metric]}: {{metric_label}}",
+    style_url,
+)
+st.markdown(
+    legend_html(
+        metric, float(values.min()), float(values.max()), map_style == "Dark"
+    ),
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Values are averaged across the selected segments for each H3 cell. "
+    f"Data source: {source_name}."
+)
 
-download_data = filtered.to_csv(index=False).encode("utf-8")
 st.download_button(
-    "Download filtered results",
-    data=download_data,
-    file_name=f"h3-results-{selected_hour:02d}.csv",
+    "Download results",
+    data=cells[["h3_id", metric]].to_csv(index=False).encode("utf-8"),
+    file_name=f"h3-{metric}.csv",
     mime="text/csv",
 )
 
-with st.expander("Filtered H3 results"):
-    st.dataframe(filtered, width="stretch", hide_index=True)
-
-st.divider()
-
-st.header("Index analysis")
-st.caption(
-    "A separate dataset describing how each segment is distributed across the "
-    "grid. These exports carry no hour column, so this map is not affected by "
-    "the two-hour period above. It follows the segment and basemap choices."
-)
-
-index_metric = st.radio(
-    "Index metric",
-    INDEX_METRICS,
-    format_func=lambda metric: METRIC_LABELS[metric],
-    horizontal=True,
-    key="index_metric",
-)
-st.caption(METRIC_HELP[index_metric])
-
-index_path = INDEX_FILES[index_metric]
-
-if not os.path.exists(index_path):
-    st.info(f"Add `{index_path}` to enable this map.")
-else:
-    try:
-        index_validation = load_index_data(
-            index_path, index_metric, os.stat(index_path).st_mtime_ns
-        )
-    except (DataValidationError, pd.errors.ParserError, UnicodeDecodeError) as error:
-        st.error(f"Unable to use {index_path}: {error}")
-    else:
-        if index_validation.removed_rows:
-            st.warning(
-                f"Excluded {index_validation.removed_rows:,} invalid row(s) from "
-                f"{index_metric}."
-            )
-
-        index_cells = aggregate_index_cells(
-            index_validation.data, selected_segments, index_metric
-        )
-
-        st.subheader(f"{METRIC_LABELS[index_metric]} by H3 cell")
-
-        if index_cells.empty:
-            st.info("No H3 cells match the selected segments.")
-        else:
-            values = index_cells[index_metric]
-            index_cells = index_cells.assign(
-                fill_color=colors_for(values, index_metric, map_style == "Dark"),
-                metric_label=[format_value(value, index_metric) for value in values],
-            )
-
-            summary_columns = st.columns(3)
-            summary_columns[0].metric("Visible H3 cells", f"{len(index_cells):,}")
-            summary_columns[1].metric(
-                "Median", format_value(float(values.median()), index_metric)
-            )
-            summary_columns[2].metric(
-                "Maximum", format_value(float(values.max()), index_metric)
-            )
-
-            render_h3_map(
-                index_cells,
-                "fill_color",
-                f"H3: {{h3_id}}\n{METRIC_LABELS[index_metric]}: {{metric_label}}",
-                style_url,
-            )
-            st.markdown(
-                legend_html(
-                    index_metric,
-                    float(values.min()),
-                    float(values.max()),
-                    map_style == "Dark",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Values are averaged across the repeated rows for each cell and "
-                "segment, then across the selected segments."
-            )
-
-            st.download_button(
-                "Download index results",
-                data=index_cells[["h3_id", index_metric]].to_csv(index=False).encode("utf-8"),
-                file_name=f"h3-{index_metric}.csv",
-                mime="text/csv",
-                key="download_index",
-            )
-
-            with st.expander(f"{METRIC_LABELS[index_metric]} results"):
-                st.dataframe(
-                    index_cells[["h3_id", index_metric]],
-                    width="stretch",
-                    hide_index=True,
-                )
-
-st.divider()
-
-st.header("Overall analysis index")
-st.caption(
-    "A third map for the overall analysis index. Like the index map above, "
-    "these exports have no hour column, so this view ignores the two-hour "
-    "period slider and follows the segment and basemap choices."
-)
-
-analysis_dataset = st.radio(
-    "Analysis dataset",
-    ANALYSIS_DATASETS,
-    format_func=lambda name: ANALYSIS_DATASET_LABELS[name],
-    horizontal=True,
-    key="analysis_dataset",
-)
-st.caption(
-    "Filtered uses `map_3/analysis_indexed_filtered.csv`; Full uses "
-    "`map_3/analysis_indexed.csv`. Both share the same overall index metric "
-    "and aggregation rules."
-)
-st.caption(METRIC_HELP[ANALYSIS_METRIC])
-
-analysis_path = ANALYSIS_FILES[analysis_dataset]
-
-if not os.path.exists(analysis_path):
-    st.info(f"Add `{analysis_path}` to enable this map.")
-else:
-    try:
-        analysis_validation = load_index_data(
-            analysis_path, ANALYSIS_METRIC, os.stat(analysis_path).st_mtime_ns
-        )
-    except (DataValidationError, pd.errors.ParserError, UnicodeDecodeError) as error:
-        st.error(f"Unable to use {analysis_path}: {error}")
-    else:
-        if analysis_validation.removed_rows:
-            st.warning(
-                f"Excluded {analysis_validation.removed_rows:,} invalid row(s) from "
-                f"{ANALYSIS_DATASET_LABELS[analysis_dataset]}."
-            )
-
-        analysis_cells = aggregate_index_cells(
-            analysis_validation.data, selected_segments, ANALYSIS_METRIC
-        )
-
-        st.subheader(
-            f"{METRIC_LABELS[ANALYSIS_METRIC]} by H3 cell "
-            f"({ANALYSIS_DATASET_LABELS[analysis_dataset]})"
-        )
-
-        if analysis_cells.empty:
-            st.info("No H3 cells match the selected segments.")
-        else:
-            values = analysis_cells[ANALYSIS_METRIC]
-            analysis_cells = analysis_cells.assign(
-                fill_color=colors_for(values, ANALYSIS_METRIC, map_style == "Dark"),
-                metric_label=[
-                    format_value(value, ANALYSIS_METRIC) for value in values
-                ],
-            )
-
-            summary_columns = st.columns(3)
-            summary_columns[0].metric("Visible H3 cells", f"{len(analysis_cells):,}")
-            summary_columns[1].metric(
-                "Median", format_value(float(values.median()), ANALYSIS_METRIC)
-            )
-            summary_columns[2].metric(
-                "Maximum", format_value(float(values.max()), ANALYSIS_METRIC)
-            )
-
-            render_h3_map(
-                analysis_cells,
-                "fill_color",
-                (
-                    f"H3: {{h3_id}}\n"
-                    f"{METRIC_LABELS[ANALYSIS_METRIC]}: {{metric_label}}"
-                ),
-                style_url,
-            )
-            st.markdown(
-                legend_html(
-                    ANALYSIS_METRIC,
-                    float(values.min()),
-                    float(values.max()),
-                    map_style == "Dark",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Values are averaged across the repeated rows for each cell and "
-                "segment, then across the selected segments. The hour slider "
-                "does not apply to this map."
-            )
-
-            st.download_button(
-                "Download analysis results",
-                data=analysis_cells[["h3_id", ANALYSIS_METRIC]]
-                .to_csv(index=False)
-                .encode("utf-8"),
-                file_name=f"h3-{analysis_dataset}.csv",
-                mime="text/csv",
-                key="download_analysis",
-            )
-
-            with st.expander(
-                f"{METRIC_LABELS[ANALYSIS_METRIC]} "
-                f"({ANALYSIS_DATASET_LABELS[analysis_dataset]}) results"
-            ):
-                st.dataframe(
-                    analysis_cells[["h3_id", ANALYSIS_METRIC]],
-                    width="stretch",
-                    hide_index=True,
-                )
+with st.expander(f"{METRIC_LABELS[metric]} results"):
+    st.dataframe(cells[["h3_id", metric]], width="stretch", hide_index=True)

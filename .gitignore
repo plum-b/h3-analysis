@@ -3,7 +3,13 @@ __pycache__/
 *.pyc
 .streamlit/secrets.toml
 
-# Production map exports stay local; keep folders via .gitkeep
-data/map_1/*.csv
+# Local config (identifiers only); .env.example is the committed template.
+.env
+
+# Never commit Google Cloud service-account keys.
+*-service-account*.json
+gcp-key*.json
+
+# Production map exports stay local; keep folders via .gitkeep.
+# The synthetic data/sample_index.csv is committed on purpose for local dev/tests.
 data/map_2/*.csv
-data/map_3/*.csv
