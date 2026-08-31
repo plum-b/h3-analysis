@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from h3_analysis.bigquery_source import index_table_fqn
+from h3_analysis.bigquery_source import day_section_table_fqn, index_table_fqn
 from h3_analysis.config import load_local_env
 
 
@@ -62,6 +62,19 @@ class ShippedExampleConfigTests(unittest.TestCase):
         ),
     }
 
+    EXPECTED_DAY_SECTIONS = {
+        "overall_index": (
+            "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered_day_sections"
+        ),
+        "volume_index": (
+            "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered_day_sections"
+        ),
+        "exclusivity_index": (
+            "maddictdata.OOH_Analysis."
+            "h3_analysis_exclusivity_index_filtered_day_sections"
+        ),
+    }
+
     def setUp(self):
         root = Path(__file__).resolve().parent.parent
         self.example = root / ".env.example"
@@ -69,17 +82,26 @@ class ShippedExampleConfigTests(unittest.TestCase):
     def test_example_exists(self):
         self.assertTrue(self.example.exists(), ".env.example must be committed")
 
-    def test_example_resolves_every_metric_table(self):
+    def _env_from_example(self) -> dict:
         env = {}
         for line in self.example.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 env[key.strip()] = value.strip().strip("'\"")
+        return env
 
+    def test_example_resolves_every_metric_table(self):
+        env = self._env_from_example()
         for metric, expected in self.EXPECTED.items():
             with self.subTest(metric=metric):
                 self.assertEqual(index_table_fqn(metric, env), expected)
+
+    def test_example_resolves_every_day_section_table(self):
+        env = self._env_from_example()
+        for metric, expected in self.EXPECTED_DAY_SECTIONS.items():
+            with self.subTest(metric=metric):
+                self.assertEqual(day_section_table_fqn(metric, env), expected)
 
     def test_example_carries_no_credentials(self):
         text = self.example.read_text(encoding="utf-8").lower()

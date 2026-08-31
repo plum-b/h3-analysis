@@ -14,21 +14,23 @@ because they use different data sources and analysis logic:
   BigQuery table. Filter: audience segment only (no time column). Data source:
   **BigQuery**. A local CSV (upload or the committed synthetic
   `data/sample_index.csv`) is an explicit development fallback only.
-- **Page 2 (`pages/2_Index_Analysis.py`) — index map.** `exclusivity_index` /
-  `volume_index` from local CSVs (`data/map_2/` or `data/sample_index.csv`).
-  Placeholder for the future day-part BigQuery version.
+- **Page 2 (`pages/2_Index_Analysis.py`) — day-part index map.** A radio
+  switches the metric between the same three names; each is a separate
+  `*_day_sections` BigQuery table carrying an extra `hour_bucket` (day-part)
+  column. Filters: audience segment **and** day-part. Data source: **BigQuery**.
+  A local CSV (upload or the committed synthetic
+  `data/sample_index_day_sections.csv`) is a development fallback only.
 
 Only one map is shown per page. Index values are **averaged, never summed**.
 
 ### 1a. Current phase and roadmap
 
-- Immediate implementation: BigQuery for **Page 1 only**, using the three
-  `*_filtered` index tables.
-- Future: migrate Page 2 to its own three BigQuery tables that add a day-part
-  (morning / noon / evening / …) dimension and a time-of-day filter. Add further
-  tables/pages only when their approved schema is supplied. The old CSV "Overall
-  analysis index" (`data/map_3`) map and the hourly `user_count` map have been
-  removed; `overall_index` is now only a Page 1 BigQuery metric.
+- **Both pages are implemented on BigQuery**: Page 1 on the three `*_filtered`
+  index tables, Page 2 on the three `*_filtered_day_sections` tables.
+- Add further tables/pages only when their approved schema is supplied. The old
+  CSV "Overall analysis index" (`data/map_3`) map and the hourly `user_count`
+  map have been removed; `overall_index` is now a BigQuery metric on both pages
+  (from different tables).
 
 ## 2. Page 1 user workflow
 
@@ -73,7 +75,9 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 - Missing configuration or permissions produce an actionable in-app message,
   not a traceback. The sidebar offers a local-CSV fallback.
 
-### 3b. CSV contract (Page 1 fallback and Page 2)
+### 3b. CSV contract (development fallbacks)
+
+Page 1 fallback (`data/sample_index.csv`, or an upload):
 
 | Field | Required format | Validation |
 | --- | --- | --- |
@@ -81,11 +85,22 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 | `segment` | Text | Non-empty category |
 | `<metric>` | Number | Finite and ≥ 0; column named after the metric |
 
-`data/sample_index.csv` carries all three metric columns. Repeated
-`(h3_id, segment)` rows are averaged (never summed); the datasets are never
-joined. Unknown extra columns are ignored. Invalid values are reported with the
-affected row count; invalid cells are excluded, never placed at an unrelated
-location.
+Page 2 fallback (`data/sample_index_day_sections.csv`, or an upload) adds:
+
+| Field | Required format | Validation |
+| --- | --- | --- |
+| `hour_bucket` | Text | Non-empty day-part label |
+
+`data/sample_index.csv` carries all three metric columns (45 cells,
+resolution 8). `data/sample_index_day_sections.csv` carries all three plus
+`hour_bucket` (250 cells, **resolution 9**, matching the live Page 2 tables).
+Because the two files differ in resolution and columns, they are **not**
+interchangeable — Page 2 must never fall back to `data/sample_index.csv`
+(see §4b-i).
+
+Repeated key rows are averaged (never summed); the datasets are never joined.
+Unknown extra columns are ignored. Invalid values are reported with the affected
+row count; invalid cells are excluded, never placed at an unrelated location.
 
 ## 4. Functional requirements
 
@@ -129,30 +144,73 @@ location.
 - Invalid H3 values: report them and exclude them from centroid/map.
 - Non-numeric / negative metric values: report the affected row count.
 
-## 4b. Page 2 — index analysis map (day-part placeholder)
+## 4b. Page 2 — day-part index analysis map
 
-A second **page** analyses the local-CSV index dataset. It reuses the shared H3
-rendering (`h3_analysis/mapping.py`), has its own segment checkboxes and basemap
-choice, tooltips, and map controls. It will become the day-part BigQuery version
-(with a morning/noon/evening filter) once those tables are provided.
+A second **page** analyses the day-section BigQuery dataset. It reuses the
+shared H3 rendering and sidebar segment checkboxes (`h3_analysis/mapping.py`),
+and adds a day-part control.
 
-- The metric control switches between `exclusivity_index` and `volume_index`.
-  The selected metric drives the cell color, tooltip value, legend, and title.
-- Each metric has its own single-hue sequential ramp so the two are never read
-  against a shared scale: blue for exclusivity, orange for volume.
-- `exclusivity_index` is near-symmetric and uses a linear scale.
-  `volume_index` spans about four orders of magnitude and uses a log scale; a
-  linear scale would collapse nearly every cell onto one step.
-- The ramp direction follows the basemap. On the dark basemap high values take
-  the light end, because the darkest steps would otherwise sink into the
-  background.
-- Percentile clipping (p2/p98) keeps a few extreme cells from flattening the ramp.
-- The dataset has no time column, so this page has no time filter. That
-  limitation is stated in the UI.
-- Repeated cell/segment rows are averaged, never summed; the index datasets are
-  never joined.
-- Missing columns, non-numeric values, negative values, and invalid H3 indexes
-  are reported with the affected row count, as on Page 1.
+### Source and schema (verified against the live tables)
+
+- One fully qualified table per metric, from configuration:
+  `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` +
+  `BIGQUERY_{OVERALL,VOLUME,EXCLUSIVITY}_INDEX_DAY_SECTIONS_TABLE`, or a
+  per-metric `BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE_FQN` override. Confirmed
+  values: project `maddictdata`, dataset `OOH_Analysis`, tables
+  `h3_analysis_indexed_filtered_day_sections` (overall),
+  `h3_analysis_volume_index_filtered_day_sections`,
+  `h3_analysis_exclusivity_index_filtered_day_sections`.
+- Schema: `h3_id` STRING, `segment` STRING, `<metric>` FLOAT, `hour_bucket`
+  STRING. The `hour_bucket` column holds **day-part labels, not hours**:
+  `Morning`, `Noon`, `After noon`, `Night`, `Other`.
+- Measured: ~601k rows and ~60.2k distinct cells per table; 3 segments × 5
+  day-parts; all `h3_id` values valid **resolution-9** cells inside the UAE
+  (lat ≈ 22.67–26.04, lon ≈ 51.62–56.37); no NULL or negative metric values.
+- **Each `(h3_id, segment, hour_bucket)` triple appears exactly once** (max
+  repeat count = 1), unlike Page 1's ~8x repeated pairs.
+
+### Filters and aggregation
+
+- The metric control switches between all three index metrics; the selected
+  metric drives the cell color, tooltip value, legend, and title.
+- Segment checkboxes behave as on Page 1; at least one is required.
+- A day-part radio selects exactly one `hour_bucket`. The page must always
+  filter to a single day-part before aggregating — averaging across day-parts
+  would silently reproduce Page 1's numbers instead of a time-of-day view.
+- Aggregation runs in BigQuery in **one step**:
+  `AVG(<metric>) ... WHERE segment IN UNNEST(@segments) AND hour_bucket = @hour_bucket GROUP BY h3_id`.
+  A Page-1-style two-step per-pair CTE is wrong here: with no duplicate triples
+  it averages single-row groups, adding cost for an identical result.
+- Segment values travel as `@segments` (ARRAY<STRING>) and the day-part as
+  `@hour_bucket` (scalar). No user value is interpolated into SQL. Results are
+  cached with `st.cache_data` keyed by table FQN, metric, segments and day-part.
+
+### Presentation and errors
+
+- Each metric has its own single-hue sequential ramp, shared with Page 1: blue
+  for exclusivity, orange for volume, teal-green for overall.
+- `exclusivity_index` and `overall_index` use a linear scale; `volume_index`
+  spans about four orders of magnitude and uses a log scale.
+- The ramp direction follows the basemap; percentile clipping (p2/p98) keeps a
+  few extreme cells from flattening it.
+- Missing configuration/permissions produce an actionable in-app message, not a
+  traceback, with a local-CSV fallback offered — as on Page 1.
+- Missing columns, non-numeric values, negative values, blank day-parts, and
+  invalid H3 indexes are reported with the affected row count.
+
+### 4b-i. Fixed defect — few cells, some in the ocean
+
+Page 2 previously read `data/map_2/exclusivity_index.csv` /
+`volume_index.csv`. That directory is empty and Git-ignored, so the page fell
+through to `data/sample_index.csv`, a **synthetic 45-cell, resolution-8** file —
+it was never connected to the real dataset. The two reported symptoms follow
+directly: "only a few cells" (45 vs ~60.2k), and "cells in the ocean" (a
+resolution-8 hexagon covers ~7x the area of a resolution-9 one, so a coastal
+cell visibly overhangs the shoreline).
+
+Investigated and ruled out: H3 ID validity, centroid/coordinate handling, and
+the shared map rendering were all correct (and are shared with the known-good
+Page 1); there is no join in this path and none should be added.
 
 ## 5. Non-functional requirements
 
@@ -169,18 +227,18 @@ choice, tooltips, and map controls. It will become the day-part BigQuery version
 h3-analysis/
 |-- app.py                    # Page 1: index map (BigQuery, 3 metric tables)
 |-- pages/
-|   `-- 2_Index_Analysis.py   # Page 2: index map (local CSV, day-part placeholder)
+|   `-- 2_Index_Analysis.py   # Page 2: day-part index map (BigQuery, 3 *_day_sections tables)
 |-- h3_analysis/
-|   |-- bigquery_source.py    # Streamlit-free BigQuery config + query builders
-|   |-- data.py               # Validation and aggregation helpers
+|   |-- bigquery_source.py    # Streamlit-free BigQuery config + query builders (both pages)
+|   |-- data.py               # Validation and aggregation helpers (index + day-section)
 |   |-- colors.py             # Sequential ramps and scaling for the index metrics
-|   |-- mapping.py            # Shared PyDeck H3 rendering and basemaps
+|   |-- mapping.py            # Shared PyDeck H3 rendering, basemaps, segment checkboxes
 |   `-- config.py             # Loads the Git-ignored local .env (identifiers only)
 |-- scripts/
-|   `-- check_bigquery.py     # Verifies config, permissions, and table schemas
+|   `-- check_bigquery.py     # Verifies config, permissions, and schemas for both pages
 |-- tests/
-|   |-- test_index.py         # Index validation, aggregation, colors, map_3 removal
-|   |-- test_bigquery.py      # FQN config, parameterized queries, aggregated validation
+|   |-- test_index.py         # Index + day-section validation, aggregation, colors, map_3 removal
+|   |-- test_bigquery.py      # FQN config, parameterized queries (both pages), aggregated validation
 |   `-- test_config.py        # .env loading precedence and .env.example resolution
 |-- .env.example              # Committed config template; .env is ignored
 |-- Dockerfile                # Cloud Run image (binds $PORT)
@@ -191,14 +249,13 @@ h3-analysis/
 |-- .streamlit/config.toml
 |-- .claude/launch.json
 `-- data/
-    |-- sample_index.csv       # Committed synthetic fallback (all 3 metric columns)
-    `-- map_2/*.csv            # Local index exports; ignored by Git
+    |-- sample_index.csv       # Committed synthetic Page 1 fallback (all 3 metrics, res 8)
+    |-- sample_index_day_sections.csv  # Committed synthetic Page 2 fallback (+ hour_bucket, res 9)
+    `-- map_2/*.csv            # Legacy local index exports; ignored by Git, no longer read
 ```
 
 ## 7. Planned evolution
 
-- Migrate Page 2 to its own three BigQuery tables adding a day-part dimension
-  and a morning/noon/evening filter.
 - Add further BigQuery tables/pages only when their approved schema and purpose
   are provided.
 - Company authentication/authorization via Cloud Run auth + IAP (see README).
@@ -206,16 +263,22 @@ h3-analysis/
 
 ## 8. Acceptance criteria for the current version
 
-- Page 1 queries the three BigQuery tables from configuration with no code
-  changes, aggregating (`AVG`) server-side, with the segment filter bound as a
-  query parameter.
-- Missing BigQuery config/permissions show an actionable message; the local
-  fallback still works.
-- Page 1's metric radio switches Overall / Volume / Exclusivity, each from its
-  own table.
-- Page 2 is a separate page with no time filter, averaging repeated rows.
+- Page 1 queries its three BigQuery tables from configuration with no code
+  changes, aggregating (`AVG`) server-side in two steps, with the segment filter
+  bound as a query parameter.
+- Page 2 queries its three `*_day_sections` BigQuery tables from configuration,
+  aggregating (`AVG`) server-side in one step, with the segment filter and the
+  day-part both bound as query parameters.
+- Missing BigQuery config/permissions show an actionable message on **both**
+  pages; the local fallback still works on both.
+- Each page's metric radio switches Overall / Volume / Exclusivity, each from
+  its own table.
+- Page 2 has a day-part filter covering every `hour_bucket` value in its
+  tables, and always aggregates within exactly one day-part.
 - All discovered segments appear as independent checkboxes on each page.
-- Valid H3 cells render in their correct UAE locations.
+- Valid H3 cells render in their correct UAE locations, at the resolution the
+  source table actually uses (9 for the live tables). Page 2 renders tens of
+  thousands of cells; a count in the tens means it fell back to synthetic data.
 - Changing the basemap does not alter the data or active filters.
 - The former CSV "Overall analysis index" map and the hourly `user_count` map,
   with their data, helpers, and tests, are gone.

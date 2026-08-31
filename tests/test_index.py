@@ -14,9 +14,13 @@ from h3_analysis.colors import (
 )
 from h3_analysis.data import (
     INDEX_METRICS,
+    PAGE2_METRICS,
     DataValidationError,
+    aggregate_day_section_cells,
     aggregate_index_cells,
+    collapse_day_section_duplicates,
     collapse_index_duplicates,
+    validate_day_section_data,
     validate_index_data,
 )
 
@@ -157,6 +161,130 @@ class IndexAggregationTests(unittest.TestCase):
             {"h3_id": [self.cell], "segment": ["Families"], metric: [0.5]}
         )
         result = aggregate_index_cells(frame, ["Nobody"], metric)
+        self.assertTrue(result.empty)
+
+
+class DaySectionValidationTests(unittest.TestCase):
+    """Page 2's day-section schema: h3_id/segment/hour_bucket/<metric>."""
+
+    def setUp(self):
+        self.cell = h3.latlng_to_cell(24.45, 54.38, 9)
+        self.other = h3.latlng_to_cell(25.20, 55.27, 9)
+
+    def frame(self, metric, values=None, segments=None, buckets=None):
+        values = [0.5, 0.25] if values is None else values
+        segments = ["Families", "Families"] if segments is None else segments
+        buckets = ["Morning", "Noon"] if buckets is None else buckets
+        return pd.DataFrame(
+            {
+                "h3_id": [self.cell] * len(values),
+                metric: values,
+                "segment": segments,
+                "hour_bucket": buckets,
+            }
+        )
+
+    def test_every_page2_metric_validates(self):
+        for metric in PAGE2_METRICS:
+            with self.subTest(metric=metric):
+                result = validate_day_section_data(self.frame(metric), metric)
+                self.assertEqual(result.removed_rows, 0)
+                self.assertEqual(len(result.data), 2)
+                self.assertIn("hour_bucket", result.data.columns)
+
+    def test_reports_missing_hour_bucket_column(self):
+        frame = self.frame("overall_index").drop(columns=["hour_bucket"])
+        with self.assertRaisesRegex(DataValidationError, "hour_bucket"):
+            validate_day_section_data(frame, "overall_index")
+
+    def test_rejects_blank_hour_bucket(self):
+        frame = self.frame(
+            "volume_index", values=[0.5], segments=["Families"], buckets=[" "]
+        )
+        with self.assertRaisesRegex(DataValidationError, "no valid"):
+            validate_day_section_data(frame, "volume_index")
+
+    def test_removes_invalid_h3_and_negative_values(self):
+        metric = "exclusivity_index"
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell, "not-a-cell", self.cell],
+                metric: [0.5, 0.5, -1.0],
+                "segment": ["Families"] * 3,
+                "hour_bucket": ["Morning"] * 3,
+            }
+        )
+        result = validate_day_section_data(frame, metric)
+        self.assertEqual(len(result.data), 1)
+        self.assertEqual(result.removed_rows, 2)
+
+    def test_rejects_unknown_metric(self):
+        with self.assertRaisesRegex(DataValidationError, "Unknown metric"):
+            validate_day_section_data(self.frame("overall_index"), "made_up_index")
+
+
+class DaySectionAggregationTests(unittest.TestCase):
+    def setUp(self):
+        self.cell = h3.latlng_to_cell(24.45, 54.38, 9)
+        self.other = h3.latlng_to_cell(25.20, 55.27, 9)
+
+    def test_collapse_averages_repeated_triples(self):
+        metric = "overall_index"
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell] * 3,
+                "segment": ["Families"] * 3,
+                "hour_bucket": ["Morning"] * 3,
+                metric: [0.2, 0.4, 0.6],
+            }
+        )
+        collapsed = collapse_day_section_duplicates(frame, metric)
+        self.assertEqual(len(collapsed), 1)
+        self.assertAlmostEqual(collapsed.loc[0, metric], 0.4)
+
+    def test_collapse_keeps_day_parts_separate(self):
+        """Same cell and segment, different hour_bucket, must not merge -
+        this is what distinguishes the day-section schema from Page 1's."""
+        metric = "overall_index"
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell, self.cell],
+                "segment": ["Families", "Families"],
+                "hour_bucket": ["Morning", "Night"],
+                metric: [0.2, 0.8],
+            }
+        )
+        self.assertEqual(len(collapse_day_section_duplicates(frame, metric)), 2)
+
+    def test_aggregate_filters_by_day_part_and_averages_segments(self):
+        metric = "volume_index"
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell, self.cell, self.cell, self.other],
+                "segment": ["Families", "HNWI", "Families", "Families"],
+                "hour_bucket": ["Morning", "Morning", "Night", "Morning"],
+                metric: [0.2, 0.6, 999.0, 0.1],
+            }
+        )
+        result = aggregate_day_section_cells(
+            frame, ["Families", "HNWI"], "Morning", metric
+        )
+        self.assertEqual(len(result), 2)
+        self.assertAlmostEqual(
+            result.loc[result["h3_id"] == self.cell, metric].iloc[0], 0.4
+        )
+
+    def test_aggregate_returns_empty_for_unmatched_day_part(self):
+        metric = "exclusivity_index"
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell],
+                "segment": ["Families"],
+                "hour_bucket": ["Morning"],
+                metric: [0.5],
+            }
+        )
+        result = aggregate_day_section_cells(frame, ["Families"], "Night", metric)
         self.assertTrue(result.empty)
 
 

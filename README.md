@@ -7,31 +7,60 @@ Streamlit page because they use different data sources and analysis logic:
 | Page | File | Data source | Filter | Metric |
 | --- | --- | --- | --- | --- |
 | 1. Index analysis | `app.py` | **BigQuery** (3 tables) — local CSV = dev fallback | audience segment | `overall_index` / `volume_index` / `exclusivity_index` (switchable) |
-| 2. Index analysis (day-part) | `pages/2_Index_Analysis.py` | local CSV (`data/map_2/*.csv` or `data/sample_index.csv`) | audience segment | `exclusivity_index` / `volume_index` |
+| 2. Index analysis (day-part) | `pages/2_Index_Analysis.py` | **BigQuery** (3 `*_day_sections` tables) — local CSV = dev fallback | audience segment **+ day-part** | `overall_index` / `volume_index` / `exclusivity_index` (switchable) |
 
 Only one map is shown per page. Each page averages the selected metric across the
 chosen segments per `h3_id` (index values are **averaged, never summed**).
 
 ## Current phase
 
-- **Page 1 is implemented on BigQuery.** One table per metric, all with the
-  logical schema `h3_id` STRING, `segment` STRING, `<metric>` FLOAT, **no time
-  column**. Each `(h3_id, segment)` pair is repeated (~8x, unevenly), so values
-  are averaged within each pair before being averaged across segments.
-  Production never reads a production CSV.
-- **Page 2 still reads local CSVs** and is a placeholder for the day-part
-  (morning / noon / evening / …) BigQuery version.
+Both pages are implemented on BigQuery. One table per metric, per page.
+
+- **Page 1** — schema `h3_id` STRING, `segment` STRING, `<metric>` FLOAT, **no
+  time column**. Each `(h3_id, segment)` pair is repeated (~8x, unevenly), so
+  values are averaged within each pair *before* being averaged across segments
+  (a two-step aggregation).
+- **Page 2** — schema `h3_id` STRING, `segment` STRING, `<metric>` FLOAT,
+  `hour_bucket` STRING (the day-part). Each `(h3_id, segment, hour_bucket)`
+  triple appears **exactly once**, so after filtering to one day-part the metric
+  is averaged across segments in a **single** step.
+
+Production never reads a production CSV on either page.
+
+### Page 2 schema (verified against the live tables)
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `h3_id` | STRING | Valid H3 cell index, **resolution 9** |
+| `segment` | STRING | `Families`, `HNWI`, `Potential Car Buyers` |
+| `<metric>` | FLOAT ≥ 0 | `overall_index` / `volume_index` / `exclusivity_index` |
+| `hour_bucket` | STRING | `Morning`, `Noon`, `After noon`, `Night`, `Other` |
+
+The column is called `hour_bucket` but holds **day-part labels, not hours**.
+Each table has ~601k rows over ~60.2k distinct cells (3 segments × 5
+day-parts), with no NULL or negative metric values, all inside the UAE.
+
+### Fixed: Page 2 showed only a few cells, some in the ocean
+
+Page 2 was never actually connected to its data. It read
+`data/map_2/exclusivity_index.csv` / `volume_index.csv`, but that directory is
+empty and `.gitignore`d, so it silently fell back to `data/sample_index.csv` — a
+**synthetic 45-cell, resolution-8** file. Hence "only a few cells" (45 vs
+~60.2k), and "cells in the ocean" (a resolution-8 hexagon covers ~7x the area of
+a resolution-9 one, so coastal cells visibly overhang the shoreline). The H3
+IDs, centroid handling, and shared map rendering were all correct, and there is
+no join anywhere in this path. Page 2 now reads its own three `*_day_sections`
+BigQuery tables, gains a day-part filter, and its local fallback
+(`data/sample_index_day_sections.csv`) is resolution 9 with the real schema.
 
 ## Future plan
 
-1. Migrate Page 2 to its own three BigQuery tables that add a day-part
-   dimension, giving Page 2 a time-of-day filter.
-2. Add further BigQuery tables/pages only when their approved schema and purpose
-   are provided.
+Add further BigQuery tables/pages only when their approved schema and purpose
+are provided.
 
 The old CSV-only "Overall analysis index" (`data/map_3`) map and the hourly
-`user_count` map have been removed. `overall_index` now lives only as a Page 1
-BigQuery metric.
+`user_count` map have been removed. `overall_index` now lives only as a
+BigQuery metric (on both pages, from different tables).
 
 ## Local development
 
@@ -51,7 +80,9 @@ H3_DATA_SOURCE=local python3 -m streamlit run app.py
 ```
 
 The local fallback uses an uploaded CSV, otherwise the committed synthetic
-`data/sample_index.csv` (which carries all three metric columns).
+`data/sample_index.csv` (which carries all three metric columns). The same
+sidebar switch and `H3_DATA_SOURCE=local` also apply to Page 2, whose fallback
+is `data/sample_index_day_sections.csv` (all three metrics plus `hour_bucket`).
 
 ### Running Page 1 against BigQuery locally
 
@@ -73,20 +104,21 @@ Verify configuration, permissions, and table schemas before launching the UI:
 python3 scripts/check_bigquery.py
 ```
 
-It resolves each metric's table, confirms `h3_id` / `segment` / `<metric>`
-exist, lists the segments, and runs the real aggregation query for one segment.
-Then start the app:
+It checks **both pages**: it resolves each metric's table, confirms the expected
+columns exist (`h3_id` / `segment` / `<metric>`, plus `hour_bucket` on Page 2),
+lists the segments and day-parts, and runs the real aggregation query for one
+segment. Then start the app:
 
 ```bash
 python3 -m streamlit run app.py
 ```
 
-Each table must expose `h3_id` (STRING), `segment` (STRING) and one numeric
-column named exactly after its metric (`overall_index` in
-`h3_analysis_indexed_filtered`, `volume_index`, `exclusivity_index`). Segment
-filters are always sent as an array query parameter; no user value is
-interpolated into SQL, and only the validated table FQN reaches the `FROM`
-clause.
+Each Page 1 table must expose `h3_id` (STRING), `segment` (STRING) and one
+numeric column named exactly after its metric; each Page 2 `*_day_sections`
+table must expose those plus `hour_bucket` (STRING). Segment filters are always
+sent as an array query parameter and the day-part as a scalar parameter; no user
+value is interpolated into SQL, and only the validated table FQN reaches the
+`FROM` clause.
 
 ## Configuration (environment variables)
 
@@ -95,11 +127,14 @@ Current production values (also in `.env.example`):
 | Variable | Purpose | Value |
 | --- | --- | --- |
 | `BIGQUERY_PROJECT_ID` | GCP project holding the tables | `maddictdata` |
-| `BIGQUERY_DATASET` | dataset holding the three tables | `OOH_Analysis` |
-| `BIGQUERY_OVERALL_INDEX_TABLE` | table for `overall_index` | `h3_analysis_indexed_filtered` |
-| `BIGQUERY_VOLUME_INDEX_TABLE` | table for `volume_index` | `h3_analysis_volume_index_filtered` |
-| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | table for `exclusivity_index` | `h3_analysis_exclusivity_index_filtered` |
-| `BIGQUERY_<METRIC>_TABLE_FQN` | optional per-metric override, full `project.dataset.table` | — |
+| `BIGQUERY_DATASET` | dataset holding all six tables | `OOH_Analysis` |
+| `BIGQUERY_OVERALL_INDEX_TABLE` | Page 1 table for `overall_index` | `h3_analysis_indexed_filtered` |
+| `BIGQUERY_VOLUME_INDEX_TABLE` | Page 1 table for `volume_index` | `h3_analysis_volume_index_filtered` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | Page 1 table for `exclusivity_index` | `h3_analysis_exclusivity_index_filtered` |
+| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `overall_index` | `h3_analysis_indexed_filtered_day_sections` |
+| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `volume_index` | `h3_analysis_volume_index_filtered_day_sections` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `exclusivity_index` | `h3_analysis_exclusivity_index_filtered_day_sections` |
+| `BIGQUERY_<METRIC>[_DAY_SECTIONS]_TABLE_FQN` | optional per-metric override, full `project.dataset.table` | — |
 | `H3_DATA_SOURCE=local` | default the sidebar to the local CSV fallback | — |
 | `PORT` | Cloud Run injects this; the app binds it | — |
 
@@ -212,7 +247,10 @@ Then set these GitHub **Variables** (identifiers, not secrets):
 `GCP_DEPLOY_SERVICE_ACCOUNT`, `CLOUD_RUN_SERVICE`,
 `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT`, `ARTIFACT_REGISTRY_REPO`,
 `BIGQUERY_PROJECT_ID`, `BIGQUERY_DATASET`, `BIGQUERY_OVERALL_INDEX_TABLE`,
-`BIGQUERY_VOLUME_INDEX_TABLE`, `BIGQUERY_EXCLUSIVITY_INDEX_TABLE`.
+`BIGQUERY_VOLUME_INDEX_TABLE`, `BIGQUERY_EXCLUSIVITY_INDEX_TABLE`,
+`BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE`,
+`BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE`,
+`BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE`.
 
 ### 5. Cloud Run deployment
 
@@ -226,7 +264,7 @@ gcloud run deploy h3-analysis \
   --service-account h3-analysis-run@maddictdata.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --ingress internal-and-cloud-load-balancing \
-  --set-env-vars ^@@^BIGQUERY_PROJECT_ID=maddictdata@@BIGQUERY_DATASET=OOH_Analysis@@BIGQUERY_OVERALL_INDEX_TABLE=h3_analysis_indexed_filtered@@BIGQUERY_VOLUME_INDEX_TABLE=h3_analysis_volume_index_filtered@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=h3_analysis_exclusivity_index_filtered
+  --set-env-vars ^@@^BIGQUERY_PROJECT_ID=maddictdata@@BIGQUERY_DATASET=OOH_Analysis@@BIGQUERY_OVERALL_INDEX_TABLE=h3_analysis_indexed_filtered@@BIGQUERY_VOLUME_INDEX_TABLE=h3_analysis_volume_index_filtered@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=h3_analysis_exclusivity_index_filtered@@BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE=h3_analysis_indexed_filtered_day_sections@@BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE=h3_analysis_volume_index_filtered_day_sections@@BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE=h3_analysis_exclusivity_index_filtered_day_sections
 ```
 
 ### 6. Internal-only access (Cloud Run auth + IAP)
@@ -255,6 +293,9 @@ gcloud run deploy h3-analysis \
 | `BIGQUERY_OVERALL_INDEX_TABLE` | e.g. `h3_analysis_indexed_filtered` |
 | `BIGQUERY_VOLUME_INDEX_TABLE` | e.g. `h3_analysis_volume_index_filtered` |
 | `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | e.g. `h3_analysis_exclusivity_index_filtered` |
+| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | e.g. `h3_analysis_indexed_filtered_day_sections` |
+| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | e.g. `h3_analysis_volume_index_filtered_day_sections` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | e.g. `h3_analysis_exclusivity_index_filtered_day_sections` |
 | `PORT` | set automatically by Cloud Run |
 
 No credentials are set as env vars; the runtime service account provides them.

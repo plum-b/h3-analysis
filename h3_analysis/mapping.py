@@ -22,6 +22,27 @@ def basemap_style(choice: str) -> str:
     return pdk.map_styles.DARK if choice == "Dark" else pdk.map_styles.CARTO_ROAD
 
 
+def segment_checkboxes(segment_values: list[str]) -> list[str]:
+    """Render the shared sidebar segment checkboxes; stop if none are selected.
+
+    Shared by both pages so "select all" and per-segment behavior stay
+    identical between them.
+    """
+    st.sidebar.subheader("Segments")
+    select_all = st.sidebar.checkbox("Select all", value=True)
+    selected = [
+        segment
+        for segment in segment_values
+        if st.sidebar.checkbox(
+            segment, value=select_all, key=f"segment_{select_all}_{segment}"
+        )
+    ]
+    if not selected:
+        st.warning("Select at least one segment to display the map.")
+        st.stop()
+    return selected
+
+
 def map_center(frame: pd.DataFrame) -> tuple[float, float]:
     """Center the view on the displayed cells, falling back to the UAE."""
     if frame.empty:

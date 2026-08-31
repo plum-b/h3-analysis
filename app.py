@@ -46,7 +46,12 @@ from h3_analysis.data import (
     validate_aggregated_cells,
     validate_index_data,
 )
-from h3_analysis.mapping import BASEMAP_OPTIONS, basemap_style, render_h3_map
+from h3_analysis.mapping import (
+    BASEMAP_OPTIONS,
+    basemap_style,
+    render_h3_map,
+    segment_checkboxes,
+)
 
 st.set_page_config(page_title="H3 Analysis - Index", page_icon="🗺️", layout="wide")
 
@@ -120,22 +125,6 @@ def _access_error(table_fqn: str, error: Exception) -> None:
         f"{_FALLBACK_HINT}"
     )
     st.stop()
-
-
-def segment_checkboxes(segment_values: list[str]) -> list[str]:
-    st.sidebar.subheader("Segments")
-    select_all = st.sidebar.checkbox("Select all", value=True)
-    selected = [
-        segment
-        for segment in segment_values
-        if st.sidebar.checkbox(
-            segment, value=select_all, key=f"segment_{select_all}_{segment}"
-        )
-    ]
-    if not selected:
-        st.warning("Select at least one segment to display the map.")
-        st.stop()
-    return selected
 
 
 def bigquery_frame(metric: str) -> tuple[pd.DataFrame, list[str], str]:

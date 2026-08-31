@@ -5,8 +5,11 @@ import pandas as pd
 
 from h3_analysis.bigquery_source import (
     BigQueryConfigError,
+    build_day_parts_query,
+    build_day_section_index_query,
     build_index_query,
     build_segments_query,
+    day_section_table_fqn,
     index_table_fqn,
 )
 from h3_analysis.data import DataValidationError, validate_aggregated_cells
@@ -130,6 +133,115 @@ class QueryConstructionTests(unittest.TestCase):
         self.assertIn("SELECT DISTINCT segment", sql)
         self.assertNotIn("hour_bucket", sql)
         self.assertNotIn("user_count", sql)
+
+
+class DayFqnTests(unittest.TestCase):
+    """Page 2's day-section tables use the same two config forms as Page 1,
+    with a ``_DAY_SECTIONS`` infix so they never collide with Page 1's vars."""
+
+    def test_per_metric_fqn_env_wins(self):
+        env = {
+            "BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE_FQN": (
+                "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered_day_sections"
+            ),
+            "BIGQUERY_PROJECT_ID": "ignored",
+        }
+        self.assertEqual(
+            day_section_table_fqn("overall_index", env),
+            "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered_day_sections",
+        )
+
+    def test_three_part_config_is_composed_per_metric(self):
+        env = {
+            "BIGQUERY_PROJECT_ID": "maddictdata",
+            "BIGQUERY_DATASET": "OOH_Analysis",
+            "BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE": (
+                "h3_analysis_volume_index_filtered_day_sections"
+            ),
+        }
+        self.assertEqual(
+            day_section_table_fqn("volume_index", env),
+            "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered_day_sections",
+        )
+
+    def test_does_not_fall_back_to_page1_env_vars(self):
+        """A Page 1 var alone must not silently resolve a Page 2 table."""
+        env = {
+            "BIGQUERY_PROJECT_ID": "maddictdata",
+            "BIGQUERY_DATASET": "OOH_Analysis",
+            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "h3_analysis_exclusivity_index_filtered",
+        }
+        with self.assertRaises(BigQueryConfigError):
+            day_section_table_fqn("exclusivity_index", env)
+
+    def test_missing_config_names_the_metric_specific_var(self):
+        env = {"BIGQUERY_PROJECT_ID": "maddictdata", "BIGQUERY_DATASET": "OOH_Analysis"}
+        with self.assertRaisesRegex(
+            BigQueryConfigError, "BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE"
+        ):
+            day_section_table_fqn("overall_index", env)
+
+    def test_unknown_metric_rejected(self):
+        with self.assertRaises(BigQueryConfigError):
+            day_section_table_fqn("made_up_index", {})
+
+
+class DaySectionQueryConstructionTests(unittest.TestCase):
+    fqn = "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered_day_sections"
+
+    def test_query_is_single_step_not_two_step(self):
+        """No per-pair duplication on the live day-section tables (verified:
+        max repeat of (h3_id, segment, hour_bucket) is 1), so unlike Page 1
+        this must NOT use a per-pair CTE."""
+        sql, params = build_day_section_index_query(
+            self.fqn, "volume_index", ["Families", "HNWI"], "Morning"
+        )
+        self.assertNotIn("per_pair", sql)
+        self.assertIn("AVG(volume_index) AS volume_index", sql)
+        self.assertIn("GROUP BY h3_id", sql)
+        self.assertNotIn("GROUP BY h3_id, segment", sql)
+        self.assertIn("@segments", sql)
+        self.assertIn("@hour_bucket", sql)
+        self.assertEqual(sql.count(f"`{self.fqn}`"), 1)
+        self.assertEqual(
+            params, {"segments": ["Families", "HNWI"], "hour_bucket": "Morning"}
+        )
+
+    def test_every_metric_uses_the_single_step_shape(self):
+        from h3_analysis.data import PAGE2_METRICS
+
+        for metric in PAGE2_METRICS:
+            with self.subTest(metric=metric):
+                sql, _ = build_day_section_index_query(
+                    self.fqn, metric, ["Families"], "Noon"
+                )
+                self.assertIn(f"AVG({metric}) AS {metric}", sql)
+                self.assertNotIn("per_pair", sql)
+
+    def test_segment_and_day_part_values_never_appear_in_sql_text(self):
+        sql, _ = build_day_section_index_query(
+            self.fqn, "overall_index", ["Fam'ilies", "HN;WI"], "Morning'; --"
+        )
+        self.assertNotIn("Fam'ilies", sql)
+        self.assertNotIn("HN;WI", sql)
+        self.assertNotIn("Morning'; --", sql)
+
+    def test_unknown_metric_rejected(self):
+        with self.assertRaises(ValueError):
+            build_day_section_index_query(self.fqn, "drop_table", ["Families"], "Noon")
+
+    def test_empty_segments_rejected(self):
+        with self.assertRaises(ValueError):
+            build_day_section_index_query(self.fqn, "volume_index", [], "Noon")
+
+    def test_empty_hour_bucket_rejected(self):
+        with self.assertRaises(ValueError):
+            build_day_section_index_query(self.fqn, "volume_index", ["Families"], "")
+
+    def test_day_parts_query_selects_only_hour_bucket(self):
+        sql = build_day_parts_query(self.fqn)
+        self.assertIn("SELECT DISTINCT hour_bucket", sql)
+        self.assertNotIn("segment", sql)
 
 
 class AggregatedValidationTests(unittest.TestCase):

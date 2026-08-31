@@ -1,8 +1,8 @@
-"""BigQuery data access for Page 1 (the index-analysis map).
+"""BigQuery data access for Page 1 and Page 2 (the index-analysis maps).
 
 This module is deliberately free of Streamlit imports so the query-construction
 logic can be unit tested without credentials or a running app. The Streamlit
-page caches the results of :func:`run_query`.
+pages cache the results of :func:`run_query`.
 
 Page 1 shows one index metric at a time, each stored in its own BigQuery table
 with the logical schema ``h3_id`` (STRING), ``segment`` (STRING) and one numeric
@@ -11,15 +11,24 @@ metric column named after the metric (``overall_index`` / ``volume_index`` /
 is **repeated** (~8x on the live tables, unevenly), so the metric is averaged in
 two steps - see :func:`build_index_query`.
 
+Page 2 shows the same three metrics from a parallel set of "*_day_sections"
+tables that add an ``hour_bucket`` (day-part, e.g. Morning/Noon/After
+noon/Night/Other) column. Verified against the live tables: each
+``(h3_id, segment, hour_bucket)`` triple is NOT repeated (max repeat count is
+1), so :func:`build_day_section_index_query` averages across segments in a
+single step - do not add a Page-1-style per-pair CTE here, it would just
+average groups that already have exactly one row.
+
 Configuration comes entirely from the environment. Per metric, either:
 
 * ``BIGQUERY_<METRIC>_TABLE_FQN`` — a full ``project.dataset.table``; or
 * ``BIGQUERY_PROJECT_ID`` + ``BIGQUERY_DATASET`` + ``BIGQUERY_<METRIC>_TABLE``
 
-where ``<METRIC>`` is ``OVERALL_INDEX``, ``VOLUME_INDEX`` or
-``EXCLUSIVITY_INDEX``. Nothing about the project, dataset, table, credentials or
-filter values is hard-coded. Segment filters are always passed as query
-parameters.
+(Page 2 uses the same two forms with a ``_DAY_SECTIONS`` infix, e.g.
+``BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE``.) ``<METRIC>`` is
+``OVERALL_INDEX``, ``VOLUME_INDEX`` or ``EXCLUSIVITY_INDEX``. Nothing about the
+project, dataset, table, credentials or filter values is hard-coded. Segment
+(and day-part) filters are always passed as query parameters.
 """
 
 from __future__ import annotations
@@ -30,7 +39,7 @@ from typing import Mapping, Optional, Sequence
 
 import pandas as pd
 
-from h3_analysis.data import PAGE1_METRICS
+from h3_analysis.data import PAGE1_METRICS, PAGE2_METRICS
 
 # BigQuery identifier rules we accept from configuration. Project ids allow
 # lowercase letters, digits and hyphens; dataset and table names allow letters,
@@ -43,9 +52,13 @@ _ENV_PROJECT = "BIGQUERY_PROJECT_ID"
 _ENV_DATASET = "BIGQUERY_DATASET"
 
 
-def _metric_env(metric: str) -> tuple[str, str]:
-    """Return the (``*_TABLE_FQN``, ``*_TABLE``) env var names for a metric."""
-    stem = f"BIGQUERY_{metric.upper()}"
+def _metric_env(metric: str, infix: str = "") -> tuple[str, str]:
+    """Return the (``*_TABLE_FQN``, ``*_TABLE``) env var names for a metric.
+
+    ``infix`` distinguishes Page 2's day-section tables (``_DAY_SECTIONS``)
+    from Page 1's plain index tables (``""``).
+    """
+    stem = f"BIGQUERY_{metric.upper()}{infix}"
     return f"{stem}_TABLE_FQN", f"{stem}_TABLE"
 
 
@@ -66,23 +79,28 @@ def _validate_parts(project: str, dataset: str, table: str) -> str:
     return f"{project}.{dataset}.{table}"
 
 
-def index_table_fqn(
-    metric: str, env: Optional[Mapping[str, str]] = None
+def _resolve_table_fqn(
+    metric: str,
+    allowed_metrics: Sequence[str],
+    page_label: str,
+    infix: str,
+    env: Optional[Mapping[str, str]],
 ) -> str:
-    """Resolve the fully qualified table name for one Page 1 metric.
+    """Shared FQN resolution for both Page 1 and Page 2 metric tables.
 
-    Prefers ``BIGQUERY_<METRIC>_TABLE_FQN``; otherwise composes the name from
-    ``BIGQUERY_PROJECT_ID`` + ``BIGQUERY_DATASET`` + ``BIGQUERY_<METRIC>_TABLE``.
-    Raises :class:`BigQueryConfigError` with an actionable message.
+    Prefers ``BIGQUERY_<METRIC>[infix]_TABLE_FQN``; otherwise composes the name
+    from ``BIGQUERY_PROJECT_ID`` + ``BIGQUERY_DATASET`` +
+    ``BIGQUERY_<METRIC>[infix]_TABLE``. Raises :class:`BigQueryConfigError` with
+    an actionable message.
     """
-    if metric not in PAGE1_METRICS:
+    if metric not in allowed_metrics:
         raise BigQueryConfigError(
-            f"Unknown Page 1 metric '{metric}'. Expected one of: "
-            + ", ".join(PAGE1_METRICS)
+            f"Unknown {page_label} metric '{metric}'. Expected one of: "
+            + ", ".join(allowed_metrics)
         )
 
     env = os.environ if env is None else env
-    fqn_key, table_key = _metric_env(metric)
+    fqn_key, table_key = _metric_env(metric, infix)
 
     fqn = _clean(env, fqn_key)
     if fqn:
@@ -114,6 +132,32 @@ def index_table_fqn(
             + "."
         )
     return _validate_parts(project, dataset, table)
+
+
+def index_table_fqn(
+    metric: str, env: Optional[Mapping[str, str]] = None
+) -> str:
+    """Resolve the fully qualified table name for one Page 1 metric.
+
+    Prefers ``BIGQUERY_<METRIC>_TABLE_FQN``; otherwise composes the name from
+    ``BIGQUERY_PROJECT_ID`` + ``BIGQUERY_DATASET`` + ``BIGQUERY_<METRIC>_TABLE``.
+    Raises :class:`BigQueryConfigError` with an actionable message.
+    """
+    return _resolve_table_fqn(metric, PAGE1_METRICS, "Page 1", "", env)
+
+
+def day_section_table_fqn(
+    metric: str, env: Optional[Mapping[str, str]] = None
+) -> str:
+    """Resolve the fully qualified table name for one Page 2 day-section metric.
+
+    Prefers ``BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE_FQN``; otherwise composes the
+    name from ``BIGQUERY_PROJECT_ID`` + ``BIGQUERY_DATASET`` +
+    ``BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE``.
+    """
+    return _resolve_table_fqn(
+        metric, PAGE2_METRICS, "Page 2", "_DAY_SECTIONS", env
+    )
 
 
 def _backtick(table_fqn: str) -> str:
@@ -174,6 +218,63 @@ def build_index_query(
         "ORDER BY h3_id"
     )
     return sql, {"segments": segments}
+
+
+def build_day_parts_query(table_fqn: str) -> str:
+    """SQL returning the distinct ``hour_bucket`` (day-part) values.
+
+    Mirrors :func:`build_segments_query`. Values are not hard-coded anywhere in
+    this module - on the live tables they are Morning / Noon / After noon /
+    Night / Other, but this queries whatever the table actually contains.
+    """
+    return (
+        "SELECT DISTINCT hour_bucket\n"
+        f"FROM {_backtick(table_fqn)}\n"
+        "WHERE hour_bucket IS NOT NULL\n"
+        "ORDER BY hour_bucket"
+    )
+
+
+def build_day_section_index_query(
+    table_fqn: str, metric: str, segments: Sequence[str], hour_bucket: str
+) -> tuple[str, dict]:
+    """Build the aggregated Page 2 day-section query and its named parameters.
+
+    Unlike Page 1's tables, each ``(h3_id, segment, hour_bucket)`` triple is
+    NOT repeated on the live day-section tables (verified against BigQuery:
+    max repeat count is 1), so this averages across the selected segments in a
+    **single** step - there is no duplicate-pair CTE to collapse first. This
+    mirrors :func:`h3_analysis.data.aggregate_day_section_cells` on the CSV
+    path (:func:`h3_analysis.data.collapse_day_section_duplicates` is a no-op
+    defensive step there for the same reason).
+
+    Aggregation happens in BigQuery; only ``h3_id`` and the averaged metric
+    come back. Segment values travel as ``@segments`` (an array) and the
+    day-part as ``@hour_bucket`` (a scalar), never interpolated into the SQL
+    text. The metric name is validated against :data:`PAGE2_METRICS` before it
+    is used as a column identifier.
+    """
+    if metric not in PAGE2_METRICS:
+        raise ValueError(
+            f"Unknown Page 2 metric '{metric}'. Expected one of: "
+            + ", ".join(PAGE2_METRICS)
+        )
+    if not segments:
+        raise ValueError("At least one segment is required.")
+    if not hour_bucket:
+        raise ValueError("A day-part (hour_bucket) is required.")
+    segments = [str(segment) for segment in segments]
+
+    sql = (
+        f"SELECT h3_id, AVG({metric}) AS {metric}\n"
+        f"FROM {_backtick(table_fqn)}\n"
+        "WHERE segment IN UNNEST(@segments)\n"
+        "  AND hour_bucket = @hour_bucket\n"
+        f"  AND {metric} IS NOT NULL\n"
+        "GROUP BY h3_id\n"
+        "ORDER BY h3_id"
+    )
+    return sql, {"segments": segments, "hour_bucket": str(hour_bucket)}
 
 
 def _query_parameters(params: Mapping[str, object]):

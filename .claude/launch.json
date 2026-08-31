@@ -2,9 +2,9 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "streamlit",
-      "runtimeExecutable": "streamlit",
-      "runtimeArgs": ["run", "app.py", "--server.headless", "true", "--server.port", "8511"],
+      "name": "streamlit-app",
+      "runtimeExecutable": "C:\\Users\\Pc\\Documents\\ChatGPT\\h3-analysis-plum-b\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.headless", "true", "--server.port", "8511"],
       "port": 8511,
       "autoPort": true
     }

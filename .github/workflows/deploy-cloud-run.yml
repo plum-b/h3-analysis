@@ -19,6 +19,13 @@ name: Deploy to Cloud Run
 #   BIGQUERY_OVERALL_INDEX_TABLE     e.g. h3_analysis_indexed_filtered
 #   BIGQUERY_VOLUME_INDEX_TABLE      e.g. h3_analysis_volume_index_filtered
 #   BIGQUERY_EXCLUSIVITY_INDEX_TABLE e.g. h3_analysis_exclusivity_index_filtered
+#   Page 2 (day-part) tables:
+#   BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE
+#     e.g. h3_analysis_indexed_filtered_day_sections
+#   BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE
+#     e.g. h3_analysis_volume_index_filtered_day_sections
+#   BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE
+#     e.g. h3_analysis_exclusivity_index_filtered_day_sections
 #   ARTIFACT_REGISTRY_REPO      e.g. containers
 
 on:
@@ -64,4 +71,4 @@ jobs:
             --service-account "${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}" \
             --no-allow-unauthenticated \
             --ingress internal-and-cloud-load-balancing \
-            --set-env-vars "^@@^BIGQUERY_PROJECT_ID=${{ vars.BIGQUERY_PROJECT_ID }}@@BIGQUERY_DATASET=${{ vars.BIGQUERY_DATASET }}@@BIGQUERY_OVERALL_INDEX_TABLE=${{ vars.BIGQUERY_OVERALL_INDEX_TABLE }}@@BIGQUERY_VOLUME_INDEX_TABLE=${{ vars.BIGQUERY_VOLUME_INDEX_TABLE }}@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=${{ vars.BIGQUERY_EXCLUSIVITY_INDEX_TABLE }}"
+            --set-env-vars "^@@^BIGQUERY_PROJECT_ID=${{ vars.BIGQUERY_PROJECT_ID }}@@BIGQUERY_DATASET=${{ vars.BIGQUERY_DATASET }}@@BIGQUERY_OVERALL_INDEX_TABLE=${{ vars.BIGQUERY_OVERALL_INDEX_TABLE }}@@BIGQUERY_VOLUME_INDEX_TABLE=${{ vars.BIGQUERY_VOLUME_INDEX_TABLE }}@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=${{ vars.BIGQUERY_EXCLUSIVITY_INDEX_TABLE }}@@BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE=${{ vars.BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE }}@@BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE=${{ vars.BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE }}@@BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE=${{ vars.BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE }}"

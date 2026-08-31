@@ -14,23 +14,28 @@ Streamlit page because they use different data and analysis logic:
   **two steps**: within each pair, then across the selected segments. **Data source is BigQuery.** A local CSV (upload or the
   synthetic `data/sample_index.csv`) exists only as an explicit development
   fallback; production never reads a production CSV.
-- **Page 2 — `pages/2_Index_Analysis.py` — index-analysis map (day-part
-  placeholder).** Segment filter only; metric switches `exclusivity_index` /
-  `volume_index`. Reads local CSVs (`data/map_2/` or `data/sample_index.csv`).
+- **Page 2 — `pages/2_Index_Analysis.py` — index-analysis map (day-part).**
+  Filters by audience segment **and day-part**. A radio switches the metric
+  between the same three names (`overall_index`, `volume_index`,
+  `exclusivity_index`); each metric is a **separate `*_day_sections` BigQuery
+  table** with schema `h3_id` / `segment` / `<metric>` / `hour_bucket`. Unlike
+  Page 1, each `(h3_id, segment, hour_bucket)` triple is **not repeated**, so
+  the map averages in **one step** across the selected segments. **Data source
+  is BigQuery.** A local CSV (upload or the synthetic
+  `data/sample_index_day_sections.csv`) is a development fallback only.
 
 Never show two maps on one page. Index values are **averaged, never summed**.
 Never join the metric tables/files on `h3_id` + `segment`.
 
 ### Current phase and future plan
 
-- Immediate implementation: BigQuery for **Page 1 only** (the three
-  `*_filtered` index tables).
-- Future: migrate Page 2 to its own three BigQuery tables that add a day-part
-  (morning / noon / evening / …) dimension, giving Page 2 a time-of-day filter.
-  Add further tables/pages only when their approved schema and purpose are
+- **Both pages are now implemented on BigQuery**: Page 1 on the three
+  `*_filtered` index tables, Page 2 on the three `*_filtered_day_sections`
+  tables.
+- Add further tables/pages only when their approved schema and purpose are
   provided. The former CSV "Overall analysis index" (`data/map_3`) map and the
-  hourly `user_count` map have been **removed**; `overall_index` now exists only
-  as a Page 1 BigQuery metric.
+  hourly `user_count` map have been **removed**; `overall_index` now exists as a
+  BigQuery metric on both pages (from different tables).
 
 ## Runtime
 
@@ -120,23 +125,104 @@ on a production CSV.
 Never commit production exports, credentials, personal data, or Streamlit
 secrets.
 
-### Page 2 — Index dataset (local CSV)
+### Page 2 — BigQuery (three day-section index tables)
 
-`data/map_2/exclusivity_index.csv` and `data/map_2/volume_index.csv` feed the
-second page.
+Same configuration pattern as Page 1, with a `_DAY_SECTIONS` infix so the two
+pages' variables never collide.
+
+| Env var | Meaning |
+| --- | --- |
+| `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` | shared project + dataset (same as Page 1) |
+| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | table for `overall_index` |
+| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | table for `volume_index` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | table for `exclusivity_index` |
+| `BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE_FQN` | optional per-metric full-FQN override |
+
+Current values are in `.env.example` (project `maddictdata`, dataset
+`OOH_Analysis`, tables `h3_analysis_indexed_filtered_day_sections`,
+`h3_analysis_volume_index_filtered_day_sections`,
+`h3_analysis_exclusivity_index_filtered_day_sections`).
+
+Each table's columns — **verified against the live tables**:
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `h3_id` | string | Valid H3 cell index |
-| `segment` | string | Audience values shared with Page 1 |
-| `exclusivity_index` or `volume_index` | numeric | Finite and >= 0 |
+| `h3_id` | STRING | Valid H3 cell index, **resolution 9** |
+| `segment` | STRING | Audience/category (`Families`, `HNWI`, `Potential Car Buyers`) |
+| `<metric>` | FLOAT ≥ 0 | Column named exactly `overall_index` / `volume_index` / `exclusivity_index` |
+| `hour_bucket` | STRING | Day-part: `Morning`, `Noon`, `After noon`, `Night`, `Other` |
 
-`data/sample_index.csv` also satisfies this contract. These files have **no time
-column**. A cell/segment pair may repeat with nothing to distinguish the rows,
-so values are averaged (`collapse_index_duplicates`) rather than summed; summing
-would push a normalized index outside its range. Do not join the index files on
-`h3_id` and `segment`: the duplicate keys turn the join into a cartesian
-product (1.7M rows becomes 16.4M).
+Note the column name is `hour_bucket` even though the values are **day-part
+labels, not hours** — do not assume the old numeric 0/2/…/22 hour buckets.
+
+Measured facts (BigQuery, read-only):
+
+- ~601k rows and ~60.2k distinct `h3_id` per table; 3 segments × 5 day-parts.
+- All sampled `h3_id` values are valid resolution-9 cells inside the UAE
+  (lat ≈ 22.67–26.04, lon ≈ 51.62–56.37).
+- No NULL and no negative metric values in any of the three tables.
+- **Each `(h3_id, segment, hour_bucket)` triple appears exactly once**
+  (max repeat count = 1). This is the key difference from Page 1, whose pairs
+  repeat ~8x.
+
+Rules:
+
+- Segment filter is `@segments` (ARRAY<STRING>) and the day-part is
+  `@hour_bucket` (scalar STRING). Never interpolate user values into SQL. Only
+  the validated table FQN and the metric name (checked against `PAGE2_METRICS`)
+  reach the SQL text.
+- Aggregate in BigQuery in **one step**: `AVG(<metric>) ... WHERE segment IN
+  UNNEST(@segments) AND hour_bucket = @hour_bucket GROUP BY h3_id`. Do **not**
+  copy Page 1's two-step per-pair CTE here — with no duplicate triples it would
+  only average single-row groups, adding cost and confusion for an identical
+  result.
+- Always filter to exactly one day-part before aggregating. Averaging across
+  day-parts would silently reproduce Page 1's numbers instead of a
+  time-of-day view.
+- Cache with `st.cache_data` keyed by table FQN + metric + segments + day-part.
+- Same ADC credential and actionable-error rules as Page 1.
+
+### Page 2 — local development fallback
+
+The committed synthetic `data/sample_index_day_sections.csv` (columns `h3_id`,
+`segment`, `hour_bucket`, `overall_index`, `volume_index`,
+`exclusivity_index`; 250 resolution-9 UAE cells × 3 segments × 5 day-parts), or
+a sidebar CSV upload with the same columns.
+
+**Do not** point Page 2 back at `data/map_2/*.csv` or `data/sample_index.csv`:
+those carry no `hour_bucket`, only two metrics, and `data/sample_index.csv` is a
+45-cell **resolution-8** sample. See "Page 2 investigation" below.
+
+### Page 2 investigation — why the old map showed few cells, some in the ocean
+
+Root cause: **Page 2 was never connected to its real data.** It read
+`data/map_2/exclusivity_index.csv` / `volume_index.csv`, but that directory is
+empty (and `.gitignore`d), so `index_path_for()` silently fell through to
+`data/sample_index.csv` — a committed **synthetic** file. The map was therefore
+rendering placeholder data, not the day-section dataset.
+
+That explains both symptoms:
+
+- **"Only a few H3 cells"** — `data/sample_index.csv` holds just **45 distinct
+  cells** (178 rows), versus ~60.2k distinct cells in the real tables.
+- **"Some cells in the ocean"** — the sample is **resolution 8**, while the real
+  data is **resolution 9**. A resolution-8 hexagon covers ~7x the area of a
+  resolution-9 one, so a coarse cell centred near the coast visibly spills over
+  the shoreline. The H3 IDs themselves were valid and their centroids correct;
+  nothing was wrong with the geometry, centroid handling, or any join.
+
+Ruled out during the investigation:
+
+- H3 validity/geometry: every sampled ID in both the CSV and the live tables is
+  a valid cell; `h3.cell_to_latlng` centroids land inside the UAE.
+- Coordinate handling: `h3_analysis/mapping.py` is shared with the known-good
+  Page 1 and was already correct — no lat/lon swap, no CRS issue.
+- Joins: there is **no join** in the Page 2 path (and none should be added);
+  the metric column travels with `h3_id` in one table.
+
+The fix was to connect Page 2 to its own three `*_day_sections` BigQuery
+tables, add the `hour_bucket` day-part filter, and replace the misleading
+fallback with a resolution-9 synthetic file that matches the real schema.
 
 ## Implementation conventions
 
@@ -145,7 +231,10 @@ product (1.7M rows becomes 16.4M).
 - Reusable data-access and helper logic lives outside the UI:
   `h3_analysis/bigquery_source.py` (Streamlit-free, unit tested),
   `h3_analysis/data.py` (validation/aggregation),
-  `h3_analysis/colors.py`, `h3_analysis/mapping.py` (shared PyDeck rendering).
+  `h3_analysis/colors.py`, `h3_analysis/mapping.py` (shared PyDeck rendering
+  plus the shared sidebar `segment_checkboxes`).
+- Both pages share `render_h3_map` / `map_center` / `segment_checkboxes`; keep
+  them identical rather than forking per-page copies.
 - Cache file loading and expensive transformations with `st.cache_data` when
   appropriate.
 - Validate required columns, numeric values, and H3 indexes before rendering;
@@ -170,12 +259,17 @@ Before considering a change complete:
 2. Start the Streamlit app with the synthetic local fallback
    (`H3_DATA_SOURCE=local`).
 3. Confirm every segment checkbox works on both pages.
-4. Confirm the Page 1 metric radio switches between all three index metrics.
-5. Confirm H3 cells appear in the UAE and tooltips show the correct values.
-6. Confirm each basemap option visibly changes the map and browser/server logs
+4. Confirm the metric radio switches between all three index metrics on **both**
+   pages.
+5. Confirm the Page 2 day-part radio switches between all five day-parts and
+   that the cell count/values change with it.
+6. Confirm H3 cells appear in the UAE and tooltips show the correct values.
+   Page 2 should render tens of thousands of cells, not tens — a suspiciously
+   small count means it fell back to synthetic data.
+7. Confirm each basemap option visibly changes the map and browser/server logs
    contain no new errors.
-7. Confirm Page 1 shows an actionable error (not a traceback) when BigQuery
-   config or permissions are missing.
+8. Confirm **both** pages show an actionable error (not a traceback) when
+   BigQuery config or permissions are missing.
 
 ## Project subagents
 

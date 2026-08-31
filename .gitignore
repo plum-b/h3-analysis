@@ -11,5 +11,9 @@ __pycache__/
 gcp-key*.json
 
 # Production map exports stay local; keep folders via .gitkeep.
-# The synthetic data/sample_index.csv is committed on purpose for local dev/tests.
+# The synthetic data/sample_index.csv and data/sample_index_day_sections.csv
+# are committed on purpose for local dev/tests.
+# data/map_2/*.csv was the old, no-day-part, two-file Page 2 CSV fallback.
+# Page 2 is now BigQuery-first (see CLAUDE.md); the rule is kept only in case
+# a real per-metric day-section CSV export is ever dropped there again.
 data/map_2/*.csv
