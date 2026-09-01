@@ -21,3 +21,37 @@ data/map_2/*.csv
 # (overall analysis index) views. Kept on disk, never committed.
 data/map_1/*.csv
 data/map_3/*.csv
+
+# --- Credentials: defence in depth ---------------------------------------
+# .env is listed above; this catches per-environment variants without hiding
+# the committed template.
+.env.*
+!.env.example
+
+# Streamlit secrets wherever they land, not just .streamlit/.
+secrets.toml
+**/secrets.toml
+
+# Private keys and certificates.
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Google Cloud and other credential files. ADC and Workload Identity
+# Federation are the supported paths - a key file here means something is
+# already wrong, so make it unstageable rather than merely discouraged.
+credentials*.json
+*-credentials.json
+service-account*.json
+application_default_credentials.json
+gha-creds-*.json
+
+# Local secret directories.
+.secrets/
+secrets/
