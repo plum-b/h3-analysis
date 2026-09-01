@@ -3,8 +3,18 @@
   "configurations": [
     {
       "name": "streamlit-app",
-      "runtimeExecutable": "C:\\Users\\Pc\\Documents\\ChatGPT\\h3-analysis-plum-b\\.venv\\Scripts\\python.exe",
-      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.headless", "true", "--server.port", "8511"],
+      "cwd": "C:/Users/Pc/Desktop/Personal stuff/Portfolio/h3-analysis",
+      "runtimeExecutable": "C:/Users/Pc/Desktop/Personal stuff/Portfolio/h3-analysis/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "C:/Users/Pc/Desktop/Personal stuff/Portfolio/h3-analysis/app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8511"
+      ],
       "port": 8511,
       "autoPort": true
     }
