@@ -25,11 +25,14 @@ from __future__ import annotations
 
 import streamlit as st
 
-from h3_analysis.config import load_local_env
+from h3_analysis.config import load_local_env, prime_streamlit_secrets
 
 st.set_page_config(page_title="H3 Grid Analysis - UAE", page_icon="🗺️", layout="wide")
 
-# Local-development convenience; deployed environments inject the real vars.
+# Streamlit Cloud passes configuration through st.secrets, which only reaches
+# os.environ once the secrets are read; .env is the local-development
+# convenience, and deployed environments inject the real vars.
+prime_streamlit_secrets()
 load_local_env()
 
 PAGES = [

@@ -37,6 +37,11 @@ Configuration comes entirely from the environment. Per metric, either:
 ``OVERALL_INDEX``, ``VOLUME_INDEX`` or ``EXCLUSIVITY_INDEX``. Nothing about the
 project, dataset, table, credentials or filter values is hard-coded. Segment
 (and day-part) filters are always passed as query parameters.
+
+Credentials come from the platform, never from this repository - a
+``[gcp_service_account]`` secret when one is configured (the Streamlit
+Community Cloud path), otherwise Application Default Credentials. See
+:data:`CREDENTIALS_HELP` and :func:`get_client`.
 """
 
 from __future__ import annotations
@@ -79,6 +84,14 @@ def _metric_env(metric: str, infix: str = "") -> tuple[str, str]:
 
 class BigQueryConfigError(RuntimeError):
     """Raised when BigQuery configuration is missing or malformed."""
+
+
+class BigQueryCredentialsError(BigQueryConfigError):
+    """Raised when no usable Google Cloud credentials are available.
+
+    A subclass of :class:`BigQueryConfigError` so existing handlers keep
+    working; the pages catch it first to show credential-specific guidance.
+    """
 
 
 def _clean(env: Mapping[str, str], key: str) -> str:
@@ -355,6 +368,182 @@ def _query_parameters(params: Mapping[str, object]):
     return job_params
 
 
+# --- Credentials -----------------------------------------------------------
+# Two supported paths, tried in this order:
+#
+# 1. A service account supplied by the platform's secrets store, under a
+#    ``[gcp_service_account]`` table. Streamlit Community Cloud needs this: it
+#    runs outside Google Cloud, so there is no metadata server and Application
+#    Default Credentials fail trying to reach ``metadata.google.internal``.
+# 2. Application Default Credentials - ``gcloud auth application-default
+#    login`` locally, or the attached runtime service account on Cloud Run.
+#
+# No key material is ever read from the repository. The secret is supplied by
+# Streamlit Cloud's Secrets UI, or, for local work, by the Git-ignored
+# ``.streamlit/secrets.toml``.
+
+SERVICE_ACCOUNT_SECRET_KEY = "gcp_service_account"
+
+# ``from_service_account_info`` itself only requires ``client_email`` and
+# ``token_uri``; the rest are checked here so a truncated paste is reported as
+# configuration rather than as a signing failure deep inside google-auth.
+REQUIRED_SERVICE_ACCOUNT_FIELDS = (
+    "type",
+    "project_id",
+    "private_key_id",
+    "private_key",
+    "client_email",
+    "token_uri",
+)
+
+_CREDENTIAL_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+
+CREDENTIALS_HELP = (
+    "No usable Google Cloud credentials were found.\n\n"
+    "On Streamlit Community Cloud there is no metadata server, so Application "
+    "Default Credentials cannot work. Add a service account to the app's "
+    "Secrets (Manage app > Settings > Secrets) as a "
+    f"`[{SERVICE_ACCOUNT_SECRET_KEY}]` table holding the fields of the "
+    "service account's JSON key: "
+    + ", ".join(f"`{field}`" for field in REQUIRED_SERVICE_ACCOUNT_FIELDS)
+    + ". The same table can live in the Git-ignored "
+    "`.streamlit/secrets.toml` for local runs.\n\n"
+    "Running locally or on Cloud Run instead? Use Application Default "
+    "Credentials: `gcloud auth application-default login`, or the attached "
+    "runtime service account."
+)
+
+# Substrings that mark "there are no credentials here" rather than a genuine
+# BigQuery/IAM failure. The first is what Streamlit Community Cloud reports.
+_MISSING_CREDENTIAL_MARKERS = (
+    "metadata.google.internal",
+    "compute engine metadata",
+    "could not automatically determine credentials",
+    "default credentials",
+)
+
+# Sentinel meaning "look the secrets up yourself". ``None`` means "there are no
+# secrets", which is a normal state and not an error.
+_DISCOVER = object()
+
+
+def _streamlit_secrets():
+    """Return Streamlit's secrets mapping, or ``None`` when there is none.
+
+    Streamlit is imported lazily so this module stays importable - and unit
+    testable - without it. A missing secrets file is not an error: it is the
+    normal local-development case, where Application Default Credentials apply.
+    """
+    try:
+        import streamlit as st
+    except Exception:  # streamlit is not installed
+        return None
+    try:
+        secrets = st.secrets
+        if SERVICE_ACCOUNT_SECRET_KEY not in secrets:
+            return None
+    except Exception:  # no secrets file at all
+        return None
+    return secrets
+
+
+def service_account_info(secrets=_DISCOVER) -> Optional[dict]:
+    """Return the validated ``[gcp_service_account]`` mapping, or ``None``.
+
+    ``None`` means no service account is configured, so the caller falls back
+    to Application Default Credentials. A section that is present but
+    incomplete raises :class:`BigQueryCredentialsError` naming the missing
+    keys - silently falling back would only resurface as the confusing
+    ``metadata.google.internal`` error.
+    """
+    if secrets is _DISCOVER:
+        secrets = _streamlit_secrets()
+    if not secrets:
+        return None
+
+    try:
+        raw = secrets[SERVICE_ACCOUNT_SECRET_KEY]
+    except (KeyError, TypeError):
+        return None
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise BigQueryCredentialsError(
+            f"The [{SERVICE_ACCOUNT_SECRET_KEY}] secret must be a TOML table "
+            "holding the fields of the service account's JSON key."
+        )
+
+    info = {str(key): value for key, value in raw.items()}
+    missing = [
+        field
+        for field in REQUIRED_SERVICE_ACCOUNT_FIELDS
+        if not str(info.get(field) or "").strip()
+    ]
+    if missing:
+        raise BigQueryCredentialsError(
+            f"The [{SERVICE_ACCOUNT_SECRET_KEY}] secret is missing: "
+            + ", ".join(missing)
+            + ". Copy every field from the service account's JSON key."
+        )
+
+    # A private key pasted on one line keeps its "\n" as two characters;
+    # google-auth needs real newlines. A TOML triple-quoted value already has
+    # them, so only the escaped form is converted.
+    private_key = info["private_key"]
+    if isinstance(private_key, str):
+        info["private_key"] = private_key.replace("\\n", "\n")
+    return info
+
+
+def credentials_from_secrets(secrets=_DISCOVER):
+    """Build service-account credentials from secrets, or ``None`` if unset."""
+    info = service_account_info(secrets)
+    if info is None:
+        return None
+
+    from google.oauth2 import service_account
+
+    try:
+        return service_account.Credentials.from_service_account_info(
+            info, scopes=list(_CREDENTIAL_SCOPES)
+        )
+    except Exception as error:
+        raise BigQueryCredentialsError(
+            f"The [{SERVICE_ACCOUNT_SECRET_KEY}] secret is not a usable "
+            f"service-account key: {error}"
+        ) from error
+
+
+def credentials_source(secrets=_DISCOVER) -> str:
+    """Describe which credential path applies, for logs and the check script."""
+    if service_account_info(secrets) is None:
+        return "Application Default Credentials"
+    return f"service account from secrets [{SERVICE_ACCOUNT_SECRET_KEY}]"
+
+
+def _is_missing_credentials(error: BaseException) -> bool:
+    """True when ``error`` means "no credentials", not "access denied"."""
+    try:
+        from google.auth import exceptions as auth_exceptions
+    except Exception:
+        auth_exceptions = None
+    if auth_exceptions is not None and isinstance(
+        error,
+        (auth_exceptions.DefaultCredentialsError, auth_exceptions.TransportError),
+    ):
+        return True
+    message = str(error).lower()
+    return any(marker in message for marker in _MISSING_CREDENTIAL_MARKERS)
+
+
+def _raise_for_missing_credentials(error: BaseException) -> None:
+    """Re-raise ``error`` as a :class:`BigQueryCredentialsError` if it is one."""
+    if isinstance(error, BigQueryCredentialsError):
+        raise error
+    if _is_missing_credentials(error):
+        raise BigQueryCredentialsError(f"{error}\n\n{CREDENTIALS_HELP}") from error
+
+
 def billing_project(env: Optional[Mapping[str, str]] = None) -> str:
     """Project that query jobs are billed to, from configuration.
 
@@ -371,16 +560,34 @@ def billing_project(env: Optional[Mapping[str, str]] = None) -> str:
     return _clean(env, _ENV_BILLING_PROJECT) or _clean(env, _ENV_PROJECT)
 
 
-def get_client(project: Optional[str] = None):
-    """Create a BigQuery client using Application Default Credentials.
+def get_client(project: Optional[str] = None, credentials=None):
+    """Create a BigQuery client from secrets or Application Default Credentials.
+
+    A ``[gcp_service_account]`` secret wins when one is configured - that is
+    the Streamlit Community Cloud path, where ADC cannot work. Otherwise the
+    client falls back to Application Default Credentials, leaving local
+    development and Cloud Run exactly as they were.
 
     ``project`` is the billing project for the jobs this client runs; it
-    defaults to the configured one (see :func:`billing_project`).
+    defaults to the configured one (see :func:`billing_project`), then to the
+    service account's own project.
     """
     from google.cloud import bigquery
 
-    project = project or billing_project()
-    return bigquery.Client(project=project) if project else bigquery.Client()
+    if credentials is None:
+        credentials = credentials_from_secrets()
+    project = (
+        project
+        or billing_project()
+        or (getattr(credentials, "project_id", "") if credentials else "")
+    )
+    try:
+        if credentials is not None:
+            return bigquery.Client(project=project or None, credentials=credentials)
+        return bigquery.Client(project=project) if project else bigquery.Client()
+    except Exception as error:
+        _raise_for_missing_credentials(error)
+        raise
 
 
 def run_query(
@@ -391,8 +598,15 @@ def run_query(
     """Execute a parameterized query and return a DataFrame."""
     from google.cloud import bigquery
 
-    client = client or get_client()
     job_config = bigquery.QueryJobConfig(
         query_parameters=_query_parameters(params or {})
     )
-    return client.query(sql, job_config=job_config).result().to_dataframe()
+    try:
+        client = client or get_client()
+        return client.query(sql, job_config=job_config).result().to_dataframe()
+    except Exception as error:
+        # Credentials can also fail when the token is first used rather than
+        # when the client is built - on Streamlit Cloud that surfaces here, as
+        # an unreachable metadata.google.internal.
+        _raise_for_missing_credentials(error)
+        raise

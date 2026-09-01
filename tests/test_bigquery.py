@@ -5,7 +5,11 @@ import pandas as pd
 
 from h3_analysis.bigquery_source import (
     BigQueryConfigError,
+    BigQueryCredentialsError,
+    REQUIRED_SERVICE_ACCOUNT_FIELDS,
+    SERVICE_ACCOUNT_SECRET_KEY,
     billing_project,
+    credentials_source,
     build_day_parts_query,
     build_day_section_index_query,
     build_index_query,
@@ -14,6 +18,7 @@ from h3_analysis.bigquery_source import (
     coerce_two_hour_period,
     day_section_table_fqn,
     index_table_fqn,
+    service_account_info,
 )
 from h3_analysis.data import DataValidationError, validate_aggregated_cells
 
@@ -344,6 +349,79 @@ class AggregatedValidationTests(unittest.TestCase):
         frame = pd.DataFrame({"h3_id": [], "overall_index": []})
         result = validate_aggregated_cells(frame, "overall_index")
         self.assertTrue(result.data.empty)
+
+
+class ServiceAccountSecretTests(unittest.TestCase):
+    """Streamlit Community Cloud runs outside Google Cloud, so Application
+    Default Credentials fail there against an unreachable
+    metadata.google.internal. A ``[gcp_service_account]`` secret is the
+    supported path; absent one, ADC still applies locally and on Cloud Run."""
+
+    def sample(self, **overrides):
+        info = {
+            "type": "service_account",
+            "project_id": "your-gcp-project",
+            "private_key_id": "0123456789abcdef",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+            "client_email": "reader@your-gcp-project.iam.gserviceaccount.com",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        info.update(overrides)
+        return {SERVICE_ACCOUNT_SECRET_KEY: info}
+
+    def test_no_secrets_means_application_default_credentials(self):
+        self.assertIsNone(service_account_info({}))
+        self.assertIsNone(service_account_info(None))
+        self.assertIsNone(service_account_info({"other": "value"}))
+        self.assertEqual(credentials_source({}), "Application Default Credentials")
+
+    def test_complete_secret_is_returned(self):
+        info = service_account_info(self.sample())
+        self.assertEqual(
+            info["client_email"],
+            "reader@your-gcp-project.iam.gserviceaccount.com",
+        )
+        for field in REQUIRED_SERVICE_ACCOUNT_FIELDS:
+            self.assertIn(field, info)
+        self.assertIn(SERVICE_ACCOUNT_SECRET_KEY, credentials_source(self.sample()))
+
+    def test_missing_fields_are_named(self):
+        secrets = self.sample()
+        del secrets[SERVICE_ACCOUNT_SECRET_KEY]["private_key"]
+        secrets[SERVICE_ACCOUNT_SECRET_KEY]["client_email"] = "   "
+        with self.assertRaises(BigQueryCredentialsError) as caught:
+            service_account_info(secrets)
+        message = str(caught.exception)
+        self.assertIn("private_key", message)
+        self.assertIn("client_email", message)
+
+    def test_credentials_error_is_a_config_error(self):
+        """The pages catch it separately, but any existing
+        BigQueryConfigError handler must still see it."""
+        self.assertTrue(
+            issubclass(BigQueryCredentialsError, BigQueryConfigError)
+        )
+
+    def test_non_table_secret_rejected(self):
+        with self.assertRaises(BigQueryCredentialsError):
+            service_account_info({SERVICE_ACCOUNT_SECRET_KEY: "paste-the-json"})
+
+    def test_escaped_newlines_in_the_private_key_are_restored(self):
+        """A key pasted on one line carries literal backslash-n, which
+        google-auth cannot parse."""
+        one_line = (
+            "-----BEGIN PRIVATE KEY-----\\nfake\\n-----END PRIVATE KEY-----\\n"
+        )
+        info = service_account_info(self.sample(private_key=one_line))
+        self.assertNotIn("\\n", info["private_key"])
+        self.assertEqual(info["private_key"].count("\n"), 3)
+
+    def test_real_newlines_are_left_alone(self):
+        info = service_account_info(self.sample())
+        self.assertEqual(
+            info["private_key"],
+            "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+        )
 
 
 if __name__ == "__main__":

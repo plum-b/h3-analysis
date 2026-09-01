@@ -8,7 +8,9 @@ It resolves each metric's table from configuration, confirms the expected
 columns exist, and runs the real segment (+ day-part, for Page 2) and
 aggregation queries against a single segment so the cost stays negligible.
 Nothing is written; no credential is read from the repository - authentication
-is Application Default Credentials.
+is a ``[gcp_service_account]`` secret when one is configured (the Streamlit
+Cloud path, readable here from a Git-ignored ``.streamlit/secrets.toml``),
+otherwise Application Default Credentials.
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from h3_analysis.bigquery_source import (  # noqa: E402
     BigQueryConfigError,
+    BigQueryCredentialsError,
     billing_project,
+    credentials_source,
     build_day_parts_query,
     build_day_section_index_query,
     build_index_query,
@@ -165,8 +169,12 @@ def check_page2_metric(client, metric: str) -> bool:
 def main() -> int:
     load_local_env()
 
+    print(f"credentials      {credentials_source()}")
     try:
         client = get_client()
+    except BigQueryCredentialsError as error:
+        print(f"FAIL  {error}")
+        return 1
     except Exception as error:
         print(f"FAIL  Could not create a BigQuery client: {error}")
         print("      Run: gcloud auth application-default login")

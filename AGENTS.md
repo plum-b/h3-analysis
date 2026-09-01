@@ -58,7 +58,10 @@ aggregating.
 - Aggregate in BigQuery. Page 1 is **two-step** (per-pair CTE, because pairs
   repeat ~8x); Page 2 is **one-step** (`GROUP BY h3_id`, because triples do
   not repeat). Do not swap these.
-- Application Default Credentials only. Cache results with `st.cache_data`.
+- Credentials: a `[gcp_service_account]` secret (`st.secrets`) when configured
+  - required on Streamlit Community Cloud, which has no metadata server -
+  otherwise Application Default Credentials. Never read a key from the repo.
+  Cache results with `st.cache_data`.
 - Query construction lives in `h3_analysis/bigquery_source.py` (Streamlit-free,
   unit tested in `tests/test_bigquery.py`).
 

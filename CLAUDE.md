@@ -139,9 +139,14 @@ Rules:
   cell. Return only `h3_id` and the metric.
 - Cache query results with `st.cache_data` keyed by table FQN + metric +
   segments + period.
-- Credentials: Application Default Credentials only. Local dev uses
+- Credentials: a `[gcp_service_account]` secret (`st.secrets`) when one is
+  configured, otherwise Application Default Credentials. Local dev uses
   `gcloud auth application-default login`; Cloud Run uses its attached service
-  account. Never commit a service-account JSON key.
+  account; Streamlit Community Cloud has no metadata server, so it must use the
+  secret — ADC there fails with an unreachable `metadata.google.internal`. The
+  secret is supplied by the platform (or a Git-ignored
+  `.streamlit/secrets.toml`); never commit a service-account JSON key, and
+  never read one from the repository.
 - Show an actionable in-app message when config or permissions are missing.
 
 ### Page 1 — local development fallback

@@ -170,15 +170,125 @@ Current production values (also in `.env.example`):
 Resolution order: real environment variables, then the Git-ignored `.env`. The
 table names live in configuration only — never in source code.
 
-Credentials come from **Application Default Credentials** — never a JSON key in
-the repo or image. Local dev uses `gcloud auth application-default login`;
-Cloud Run uses its attached runtime service account.
+Credentials never live in the repository or the image. The client resolves them
+in this order:
+
+1. A **`[gcp_service_account]` secret** (`st.secrets`), when one is configured —
+   the Streamlit Community Cloud path, see
+   [Deployment: Streamlit Community Cloud](#deployment-streamlit-community-cloud).
+2. **Application Default Credentials** otherwise — `gcloud auth
+   application-default login` locally, the attached runtime service account on
+   Cloud Run.
+
+So local development and Cloud Run are unchanged; only Streamlit Cloud, which
+runs outside Google Cloud and therefore has no metadata server, needs the
+secret.
 
 ## Tests
 
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+## Deployment: Streamlit Community Cloud
+
+Streamlit Community Cloud runs outside Google Cloud. There is no metadata
+server there, so Application Default Credentials cannot resolve and every query
+fails with `metadata.google.internal` being unreachable — even though the same
+code works locally. Give the app a service account through its **Secrets**
+instead; nothing changes for local development, which still uses ADC.
+
+### Secrets TOML
+
+**Manage app → ⋮ → Settings → Secrets**, then paste the block below. Every
+value here is a **placeholder** — fill in your own, and never commit the result.
+Streamlit also promotes top-level secrets to environment variables, which is how
+the table configuration below reaches `h3_analysis/config.py`.
+
+```toml
+# Table configuration (same names as the environment variables above).
+BIGQUERY_PROJECT_ID = "your-gcp-project"
+BIGQUERY_DATASET = "your_dataset"
+BIGQUERY_BILLING_PROJECT = "your-gcp-project"
+
+BIGQUERY_OVERALL_INDEX_TABLE = "overall_index_table"
+BIGQUERY_VOLUME_INDEX_TABLE = "volume_index_table"
+BIGQUERY_EXCLUSIVITY_INDEX_TABLE = "exclusivity_index_table"
+
+BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE = "overall_index_day_sections_table"
+BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE = "volume_index_day_sections_table"
+BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE = "exclusivity_index_day_sections_table"
+
+# Credentials: the fields of the service account's JSON key, verbatim.
+[gcp_service_account]
+type = "service_account"
+project_id = "your-gcp-project"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\nYOUR_KEY_LINES\n-----END PRIVATE KEY-----\n"
+client_email = "h3-analysis-reader@your-gcp-project.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/h3-analysis-reader%40your-gcp-project.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
+```
+
+| `[gcp_service_account]` key | Required | Where it comes from |
+| --- | --- | --- |
+| `type` | yes | JSON key field `type` (always `service_account`) |
+| `project_id` | yes | JSON key field `project_id` |
+| `private_key_id` | yes | JSON key field `private_key_id` |
+| `private_key` | yes | JSON key field `private_key`, `\n` escapes intact |
+| `client_email` | yes | JSON key field `client_email` |
+| `token_uri` | yes | JSON key field `token_uri` |
+| `client_id`, `auth_uri`, `auth_provider_x509_cert_url`, `client_x509_cert_url`, `universe_domain` | no | the identically named JSON key fields |
+
+Every value is copied from the service account's JSON key file — nothing is
+invented and nothing belongs in Git.
+
+### Getting the values
+
+```bash
+PROJECT_ID=your-gcp-project
+SA=h3-analysis-reader@${PROJECT_ID}.iam.gserviceaccount.com
+
+gcloud iam service-accounts create h3-analysis-reader \
+  --project "$PROJECT_ID" --display-name="H3 analysis read-only"
+
+# Run query jobs in the billing project.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA}" --role="roles/bigquery.jobUser"
+
+# Read the six tables.
+bq add-iam-policy-binding \
+  --member="serviceAccount:${SA}" \
+  --role="roles/bigquery.dataViewer" \
+  "${PROJECT_ID}:your_dataset"
+
+# The JSON key whose fields become the [gcp_service_account] table.
+gcloud iam service-accounts keys create ~/h3-analysis-key.json \
+  --iam-account "$SA"
+```
+
+Console equivalent: **IAM & Admin → Service Accounts →** the account **→ Keys →
+Add key → Create new key → JSON**. Open the downloaded file and copy each field
+into the TOML above, then delete the file — Streamlit's Secrets store is the
+only copy that should survive. `roles/bigquery.jobUser` on the billing project
+and `roles/bigquery.dataViewer` on the dataset are exactly the permissions the
+app needs; anything more is unnecessary.
+
+### Local use of the same path
+
+Put the identical `[gcp_service_account]` table in `.streamlit/secrets.toml` to
+exercise the Streamlit Cloud credential path locally. That file — and every
+`secrets.toml`, `.env`, and `*service-account*.json` — is Git-ignored; see
+[Do not commit](#do-not-commit).
+
+If the section is missing or incomplete, both pages stop with **"BigQuery
+authentication is not configured"**, naming the keys to add, and
+`python3 scripts/check_bigquery.py` prints the same guidance instead of a
+traceback.
 
 ## Deployment guide (Cloud Run + Workload Identity Federation)
 

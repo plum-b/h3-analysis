@@ -32,6 +32,7 @@ import streamlit as st
 
 from h3_analysis.bigquery_source import (
     BigQueryConfigError,
+    BigQueryCredentialsError,
     build_index_query,
     build_segments_query,
     build_two_hour_periods_query,
@@ -45,7 +46,7 @@ from h3_analysis.colors import (
     format_value,
     legend_html,
 )
-from h3_analysis.config import load_local_env
+from h3_analysis.config import load_local_env, prime_streamlit_secrets
 from h3_analysis.data import (
     PAGE1_METRICS,
     DataValidationError,
@@ -63,8 +64,11 @@ from h3_analysis.mapping import (
     segment_checkboxes,
 )
 
-# Local-development convenience; deployed environments inject the real vars.
+# Streamlit Cloud passes configuration through st.secrets, which only reaches
+# os.environ once the secrets are read; .env is the local-development
+# convenience, and deployed environments inject the real vars.
 # ``app.py`` owns st.set_page_config; a page script must not call it again.
+prime_streamlit_secrets()
 load_local_env()
 
 LOCAL_SAMPLE_FILE = "data/sample_index_two_hours.csv"
@@ -147,6 +151,20 @@ def _config_error(message: str) -> None:
     st.stop()
 
 
+def _credentials_error(error: Exception) -> None:
+    """No usable Google Cloud credentials - ADC locally, a secret on Cloud.
+
+    Streamlit Community Cloud runs outside Google Cloud, so Application
+    Default Credentials cannot reach the metadata server there; the message
+    carried by the error names the secret keys to add.
+    """
+    st.error(
+        f"**BigQuery authentication is not configured.**\n\n{error}\n\n"
+        f"{_FALLBACK_HINT}"
+    )
+    st.stop()
+
+
 def _access_error(table_fqn: str, error: Exception) -> None:
     """Configuration resolved but the query failed - credentials or IAM."""
     detail = str(error)
@@ -188,6 +206,8 @@ def bigquery_frame(metric: str) -> tuple:
     try:
         segment_values = load_segments(table_fqn)
         period_values = load_two_hour_periods(table_fqn)
+    except BigQueryCredentialsError as error:
+        _credentials_error(error)
     except BigQueryConfigError as error:
         _config_error(str(error))
     except Exception as error:  # google.auth / api_core errors
@@ -207,6 +227,8 @@ def bigquery_frame(metric: str) -> tuple:
         raw = load_bigquery_cells(
             table_fqn, metric, tuple(selected_segments), selected_period
         )
+    except BigQueryCredentialsError as error:
+        _credentials_error(error)
     except Exception as error:
         _access_error(table_fqn, error)
 
