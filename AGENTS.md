@@ -46,8 +46,9 @@ aggregating.
   infix (`BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE`, …). Either accepts a
   per-metric `BIGQUERY_<METRIC>[_DAY_SECTIONS]_TABLE_FQN`. Never hard-code a
   project, dataset, table, credential, or SQL value. Values live in
-  `.env.example` → `cp .env.example .env` (project `maddictdata`, dataset
-  `OOH_Analysis`), with jobs billed to `BIGQUERY_BILLING_PROJECT` or
+  `.env.example` holds placeholders only; `cp .env.example .env` then fill in
+  the real names, which are not committed (project `your-gcp-project`, dataset
+  `your_dataset`), with jobs billed to `BIGQUERY_BILLING_PROJECT` or
   `BIGQUERY_PROJECT_ID` — never to the ambient `gcloud` default.
   Verify with `python3 scripts/check_bigquery.py` (checks both
   pages).

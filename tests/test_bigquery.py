@@ -21,34 +21,34 @@ from h3_analysis.data import DataValidationError, validate_aggregated_cells
 class TableFqnTests(unittest.TestCase):
     def test_per_metric_fqn_env_wins(self):
         env = {
-            "BIGQUERY_OVERALL_INDEX_TABLE_FQN": "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered",
+            "BIGQUERY_OVERALL_INDEX_TABLE_FQN": "your-gcp-project.your_dataset.overall_index_table",
             "BIGQUERY_PROJECT_ID": "ignored",
         }
         self.assertEqual(
             index_table_fqn("overall_index", env),
-            "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered",
+            "your-gcp-project.your_dataset.overall_index_table",
         )
 
     def test_three_part_config_is_composed_per_metric(self):
         env = {
-            "BIGQUERY_PROJECT_ID": "maddictdata",
-            "BIGQUERY_DATASET": "OOH_Analysis",
-            "BIGQUERY_VOLUME_INDEX_TABLE": "h3_analysis_volume_index_filtered",
-            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "h3_analysis_exclusivity_index_filtered",
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
+            "BIGQUERY_VOLUME_INDEX_TABLE": "volume_index_table",
+            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "exclusivity_index_table",
         }
         self.assertEqual(
             index_table_fqn("volume_index", env),
-            "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered",
+            "your-gcp-project.your_dataset.volume_index_table",
         )
         self.assertEqual(
             index_table_fqn("exclusivity_index", env),
-            "maddictdata.OOH_Analysis.h3_analysis_exclusivity_index_filtered",
+            "your-gcp-project.your_dataset.exclusivity_index_table",
         )
 
     def test_missing_config_names_the_metric_specific_var(self):
         env = {
-            "BIGQUERY_PROJECT_ID": "maddictdata",
-            "BIGQUERY_DATASET": "OOH_Analysis",
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
         }
         with self.assertRaisesRegex(
             BigQueryConfigError, "BIGQUERY_OVERALL_INDEX_TABLE"
@@ -71,8 +71,8 @@ class TableFqnTests(unittest.TestCase):
 
     def test_injection_attempt_in_table_name_is_rejected(self):
         env = {
-            "BIGQUERY_PROJECT_ID": "maddictdata",
-            "BIGQUERY_DATASET": "OOH_Analysis",
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
             "BIGQUERY_VOLUME_INDEX_TABLE": "t`; DROP TABLE x; --",
         }
         with self.assertRaises(BigQueryConfigError):
@@ -80,7 +80,7 @@ class TableFqnTests(unittest.TestCase):
 
 
 class QueryConstructionTests(unittest.TestCase):
-    fqn = "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered"
+    fqn = "your-gcp-project.your_dataset.volume_index_table"
 
     def test_index_query_is_parameterized_and_aggregates(self):
         sql, params = build_index_query(
@@ -181,12 +181,12 @@ class BillingProjectTests(unittest.TestCase):
 
     def test_defaults_to_the_data_project(self):
         self.assertEqual(
-            billing_project({"BIGQUERY_PROJECT_ID": "maddictdata"}), "maddictdata"
+            billing_project({"BIGQUERY_PROJECT_ID": "your-gcp-project"}), "your-gcp-project"
         )
 
     def test_explicit_billing_project_wins(self):
         env = {
-            "BIGQUERY_PROJECT_ID": "maddictdata",
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
             "BIGQUERY_BILLING_PROJECT": "billing-project",
         }
         self.assertEqual(billing_project(env), "billing-project")
@@ -202,40 +202,40 @@ class DayFqnTests(unittest.TestCase):
     def test_per_metric_fqn_env_wins(self):
         env = {
             "BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE_FQN": (
-                "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered_day_sections"
+                "your-gcp-project.your_dataset.overall_index_day_sections_table"
             ),
             "BIGQUERY_PROJECT_ID": "ignored",
         }
         self.assertEqual(
             day_section_table_fqn("overall_index", env),
-            "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered_day_sections",
+            "your-gcp-project.your_dataset.overall_index_day_sections_table",
         )
 
     def test_three_part_config_is_composed_per_metric(self):
         env = {
-            "BIGQUERY_PROJECT_ID": "maddictdata",
-            "BIGQUERY_DATASET": "OOH_Analysis",
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
             "BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE": (
-                "h3_analysis_volume_index_filtered_day_sections"
+                "volume_index_day_sections_table"
             ),
         }
         self.assertEqual(
             day_section_table_fqn("volume_index", env),
-            "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered_day_sections",
+            "your-gcp-project.your_dataset.volume_index_day_sections_table",
         )
 
     def test_does_not_fall_back_to_page1_env_vars(self):
         """A Page 1 var alone must not silently resolve a Page 2 table."""
         env = {
-            "BIGQUERY_PROJECT_ID": "maddictdata",
-            "BIGQUERY_DATASET": "OOH_Analysis",
-            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "h3_analysis_exclusivity_index_filtered",
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
+            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "exclusivity_index_table",
         }
         with self.assertRaises(BigQueryConfigError):
             day_section_table_fqn("exclusivity_index", env)
 
     def test_missing_config_names_the_metric_specific_var(self):
-        env = {"BIGQUERY_PROJECT_ID": "maddictdata", "BIGQUERY_DATASET": "OOH_Analysis"}
+        env = {"BIGQUERY_PROJECT_ID": "your-gcp-project", "BIGQUERY_DATASET": "your_dataset"}
         with self.assertRaisesRegex(
             BigQueryConfigError, "BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE"
         ):
@@ -247,7 +247,7 @@ class DayFqnTests(unittest.TestCase):
 
 
 class DaySectionQueryConstructionTests(unittest.TestCase):
-    fqn = "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered_day_sections"
+    fqn = "your-gcp-project.your_dataset.volume_index_day_sections_table"
 
     def test_query_is_single_step_not_two_step(self):
         """No per-pair duplication on the live day-section tables (verified:

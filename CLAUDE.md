@@ -95,9 +95,11 @@ happens to point at, producing a `bigquery.jobs.create` permission error that
 names a project appearing nowhere in this repository — while the tables
 themselves are perfectly readable.
 
-Current values live in the committed `.env.example` (project `maddictdata`,
-dataset `OOH_Analysis`, tables `h3_analysis_indexed_filtered`,
-`h3_analysis_volume_index_filtered`, `h3_analysis_exclusivity_index_filtered`).
+The committed `.env.example` carries **placeholders only** - the repository is
+public, so the real project, dataset and table names are not in Git. Get them
+from the dataset owner. The template shape is (project `your-gcp-project`,
+dataset `your_dataset`, tables `overall_index_table`,
+`volume_index_table`, `exclusivity_index_table`).
 Developers `cp .env.example .env`; `h3_analysis/config.py` loads that file
 without overriding real environment variables. `.env` is Git-ignored and holds
 identifiers only — never credentials.
@@ -170,10 +172,10 @@ pages' variables never collide.
 | `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | table for `exclusivity_index` |
 | `BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE_FQN` | optional per-metric full-FQN override |
 
-Current values are in `.env.example` (project `maddictdata`, dataset
-`OOH_Analysis`, tables `h3_analysis_indexed_filtered_day_sections`,
-`h3_analysis_volume_index_filtered_day_sections`,
-`h3_analysis_exclusivity_index_filtered_day_sections`).
+`.env.example` shows the shape with placeholders (project `your-gcp-project`, dataset
+`your_dataset`, tables `overall_index_day_sections_table`,
+`volume_index_day_sections_table`,
+`exclusivity_index_day_sections_table`).
 
 Each table's columns — **verified against the live tables**:
 

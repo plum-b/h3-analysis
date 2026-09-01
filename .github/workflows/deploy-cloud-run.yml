@@ -14,18 +14,18 @@ name: Deploy to Cloud Run
 #   CLOUD_RUN_SERVICE           e.g. h3-analysis
 #   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT
 #     h3-analysis-run@my-proj-123.iam.gserviceaccount.com
-#   BIGQUERY_PROJECT_ID              e.g. maddictdata
-#   BIGQUERY_DATASET                 e.g. OOH_Analysis
-#   BIGQUERY_OVERALL_INDEX_TABLE     e.g. h3_analysis_indexed_filtered
-#   BIGQUERY_VOLUME_INDEX_TABLE      e.g. h3_analysis_volume_index_filtered
-#   BIGQUERY_EXCLUSIVITY_INDEX_TABLE e.g. h3_analysis_exclusivity_index_filtered
+#   BIGQUERY_PROJECT_ID              e.g. your-gcp-project
+#   BIGQUERY_DATASET                 e.g. your_dataset
+#   BIGQUERY_OVERALL_INDEX_TABLE     e.g. overall_index_table
+#   BIGQUERY_VOLUME_INDEX_TABLE      e.g. volume_index_table
+#   BIGQUERY_EXCLUSIVITY_INDEX_TABLE e.g. exclusivity_index_table
 #   Page 2 (day-part) tables:
 #   BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE
-#     e.g. h3_analysis_indexed_filtered_day_sections
+#     e.g. overall_index_day_sections_table
 #   BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE
-#     e.g. h3_analysis_volume_index_filtered_day_sections
+#     e.g. volume_index_day_sections_table
 #   BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE
-#     e.g. h3_analysis_exclusivity_index_filtered_day_sections
+#     e.g. exclusivity_index_day_sections_table
 #   ARTIFACT_REGISTRY_REPO      e.g. containers
 
 on:

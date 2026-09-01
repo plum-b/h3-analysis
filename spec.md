@@ -56,9 +56,9 @@ Only one map is shown per page. Index values are **averaged, never summed**.
   `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` +
   `BIGQUERY_{OVERALL,VOLUME,EXCLUSIVITY}_INDEX_TABLE`, or a per-metric
   `BIGQUERY_<METRIC>_TABLE_FQN` override. No project, dataset, table, credential,
-  or SQL value is hard-coded. Confirmed values: project `maddictdata`, dataset
-  `OOH_Analysis`, tables `h3_analysis_indexed_filtered` (overall),
-  `h3_analysis_volume_index_filtered`, `h3_analysis_exclusivity_index_filtered`.
+  or SQL value is hard-coded. Confirmed values: project `your-gcp-project`, dataset
+  `your_dataset`, tables `overall_index_table` (overall),
+  `volume_index_table`, `exclusivity_index_table`.
 - Resolution order is real environment variables, then the Git-ignored `.env`
   (template: `.env.example`). `scripts/check_bigquery.py` validates the wiring.
 - Each table's schema: `h3_id` STRING, `segment` STRING, and one numeric column
@@ -164,10 +164,10 @@ and adds a day-part control.
   `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` +
   `BIGQUERY_{OVERALL,VOLUME,EXCLUSIVITY}_INDEX_DAY_SECTIONS_TABLE`, or a
   per-metric `BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE_FQN` override. Confirmed
-  values: project `maddictdata`, dataset `OOH_Analysis`, tables
-  `h3_analysis_indexed_filtered_day_sections` (overall),
-  `h3_analysis_volume_index_filtered_day_sections`,
-  `h3_analysis_exclusivity_index_filtered_day_sections`.
+  values: project `your-gcp-project`, dataset `your_dataset`, tables
+  `overall_index_day_sections_table` (overall),
+  `volume_index_day_sections_table`,
+  `exclusivity_index_day_sections_table`.
 - Schema: `h3_id` STRING, `segment` STRING, `<metric>` FLOAT, `hour_bucket`
   STRING. The `hour_bucket` column holds **day-part labels, not hours**:
   `Morning`, `Noon`, `After noon`, `Night`, `Other`.

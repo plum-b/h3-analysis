@@ -5,6 +5,7 @@ from pathlib import Path
 
 from h3_analysis.bigquery_source import day_section_table_fqn, index_table_fqn
 from h3_analysis.config import load_local_env
+from h3_analysis.data import PAGE1_METRICS, PAGE2_METRICS
 
 
 class LocalEnvLoadingTests(unittest.TestCase):
@@ -28,20 +29,20 @@ class LocalEnvLoadingTests(unittest.TestCase):
 
     def test_loads_pairs_and_skips_comments_and_blanks(self):
         path = self.write(
-            "# a comment\n\nBIGQUERY_PROJECT_ID=maddictdata\n"
-            "BIGQUERY_DATASET = OOH_Analysis \nnot a pair\n"
+            "# a comment\n\nBIGQUERY_PROJECT_ID=your-gcp-project\n"
+            "BIGQUERY_DATASET = your_dataset \nnot a pair\n"
         )
         os.environ.pop("BIGQUERY_PROJECT_ID", None)
         os.environ.pop("BIGQUERY_DATASET", None)
         applied = load_local_env(path)
-        self.assertEqual(applied["BIGQUERY_PROJECT_ID"], "maddictdata")
-        self.assertEqual(os.environ["BIGQUERY_DATASET"], "OOH_Analysis")
+        self.assertEqual(applied["BIGQUERY_PROJECT_ID"], "your-gcp-project")
+        self.assertEqual(os.environ["BIGQUERY_DATASET"], "your_dataset")
 
     def test_strips_surrounding_quotes(self):
-        path = self.write('BIGQUERY_DATASET="OOH_Analysis"\n')
+        path = self.write('BIGQUERY_DATASET="your_dataset"\n')
         os.environ.pop("BIGQUERY_DATASET", None)
         load_local_env(path)
-        self.assertEqual(os.environ["BIGQUERY_DATASET"], "OOH_Analysis")
+        self.assertEqual(os.environ["BIGQUERY_DATASET"], "your_dataset")
 
     def test_existing_environment_wins(self):
         path = self.write("BIGQUERY_DATASET=from_file\n")
@@ -52,28 +53,13 @@ class LocalEnvLoadingTests(unittest.TestCase):
 
 
 class ShippedExampleConfigTests(unittest.TestCase):
-    """The committed .env.example must resolve to the agreed tables."""
+    """The committed .env.example must resolve a table for every metric.
 
-    EXPECTED = {
-        "overall_index": "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered",
-        "volume_index": "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered",
-        "exclusivity_index": (
-            "maddictdata.OOH_Analysis.h3_analysis_exclusivity_index_filtered"
-        ),
-    }
-
-    EXPECTED_DAY_SECTIONS = {
-        "overall_index": (
-            "maddictdata.OOH_Analysis.h3_analysis_indexed_filtered_day_sections"
-        ),
-        "volume_index": (
-            "maddictdata.OOH_Analysis.h3_analysis_volume_index_filtered_day_sections"
-        ),
-        "exclusivity_index": (
-            "maddictdata.OOH_Analysis."
-            "h3_analysis_exclusivity_index_filtered_day_sections"
-        ),
-    }
+    The real project/dataset/table names are not committed - the repository is
+    public - so these assert the template is *complete and well formed* rather
+    than pinning particular identifiers. Hard-coding the expected names here
+    would just reintroduce them one file over.
+    """
 
     def setUp(self):
         root = Path(__file__).resolve().parent.parent
@@ -93,15 +79,35 @@ class ShippedExampleConfigTests(unittest.TestCase):
 
     def test_example_resolves_every_metric_table(self):
         env = self._env_from_example()
-        for metric, expected in self.EXPECTED.items():
+        for metric in PAGE1_METRICS:
             with self.subTest(metric=metric):
-                self.assertEqual(index_table_fqn(metric, env), expected)
+                fqn = index_table_fqn(metric, env)
+                self.assertEqual(len(fqn.split(".")), 3, fqn)
+                self.assertTrue(all(fqn.split(".")))
 
     def test_example_resolves_every_day_section_table(self):
         env = self._env_from_example()
-        for metric, expected in self.EXPECTED_DAY_SECTIONS.items():
+        for metric in PAGE2_METRICS:
             with self.subTest(metric=metric):
-                self.assertEqual(day_section_table_fqn(metric, env), expected)
+                fqn = day_section_table_fqn(metric, env)
+                self.assertEqual(len(fqn.split(".")), 3, fqn)
+                self.assertTrue(all(fqn.split(".")))
+
+    def test_example_gives_each_metric_and_page_its_own_table(self):
+        """Six distinct tables - a copy-paste slip would collide them."""
+        env = self._env_from_example()
+        fqns = [index_table_fqn(m, env) for m in PAGE1_METRICS]
+        fqns += [day_section_table_fqn(m, env) for m in PAGE2_METRICS]
+        self.assertEqual(len(set(fqns)), 6)
+
+    def test_example_carries_no_real_identifiers(self):
+        """The public template must stay placeholders, not the live names."""
+        text = self.example.read_text(encoding="utf-8")
+        env = self._env_from_example()
+        for key in ("BIGQUERY_PROJECT_ID", "BIGQUERY_DATASET"):
+            with self.subTest(key=key):
+                self.assertIn("your", env[key].lower(), key)
+        self.assertIn("PLACEHOLDER", text.upper())
 
     def test_example_carries_no_credentials(self):
         text = self.example.read_text(encoding="utf-8").lower()

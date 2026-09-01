@@ -153,16 +153,16 @@ Current production values (also in `.env.example`):
 
 | Variable | Purpose | Value |
 | --- | --- | --- |
-| `BIGQUERY_PROJECT_ID` | GCP project holding the tables | `maddictdata` |
-| `BIGQUERY_DATASET` | dataset holding all six tables | `OOH_Analysis` |
-| `BIGQUERY_BILLING_PROJECT` | Project the query **jobs** are billed to (defaults to `BIGQUERY_PROJECT_ID`) | `maddictdata` |
+| `BIGQUERY_PROJECT_ID` | GCP project holding the tables | `your-gcp-project` |
+| `BIGQUERY_DATASET` | dataset holding all six tables | `your_dataset` |
+| `BIGQUERY_BILLING_PROJECT` | Project the query **jobs** are billed to (defaults to `BIGQUERY_PROJECT_ID`) | `your-gcp-project` |
 | `H3_BASEMAP_STYLE_URL` | MapLibre style.json URL for the detailed basemap (optional) | OpenFreeMap Liberty |
-| `BIGQUERY_OVERALL_INDEX_TABLE` | Page 1 table for `overall_index` | `h3_analysis_indexed_filtered` |
-| `BIGQUERY_VOLUME_INDEX_TABLE` | Page 1 table for `volume_index` | `h3_analysis_volume_index_filtered` |
-| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | Page 1 table for `exclusivity_index` | `h3_analysis_exclusivity_index_filtered` |
-| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `overall_index` | `h3_analysis_indexed_filtered_day_sections` |
-| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `volume_index` | `h3_analysis_volume_index_filtered_day_sections` |
-| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `exclusivity_index` | `h3_analysis_exclusivity_index_filtered_day_sections` |
+| `BIGQUERY_OVERALL_INDEX_TABLE` | Page 1 table for `overall_index` | `overall_index_table` |
+| `BIGQUERY_VOLUME_INDEX_TABLE` | Page 1 table for `volume_index` | `volume_index_table` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | Page 1 table for `exclusivity_index` | `exclusivity_index_table` |
+| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `overall_index` | `overall_index_day_sections_table` |
+| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `volume_index` | `volume_index_day_sections_table` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | Page 2 table for `exclusivity_index` | `exclusivity_index_day_sections_table` |
 | `BIGQUERY_<METRIC>[_DAY_SECTIONS]_TABLE_FQN` | optional per-metric override, full `project.dataset.table` | — |
 | `H3_DATA_SOURCE=local` | default the sidebar to the local CSV fallback | — |
 | `PORT` | Cloud Run injects this; the app binds it | — |
@@ -212,7 +212,7 @@ Grant the runtime service account the least privilege that still lets it run a
 query and read the three tables:
 
 ```bash
-PROJECT_ID=maddictdata
+PROJECT_ID=your-gcp-project
 RUN_SA=h3-analysis-run@${PROJECT_ID}.iam.gserviceaccount.com
 
 # Run query jobs in the project.
@@ -225,7 +225,7 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 bq add-iam-policy-binding \
   --member="serviceAccount:${RUN_SA}" \
   --role="roles/bigquery.dataViewer" \
-  "${PROJECT_ID}:OOH_Analysis"
+  "${PROJECT_ID}:your_dataset"
 ```
 
 If the tables live in another project, also grant `roles/bigquery.jobUser`
@@ -234,7 +234,7 @@ there (or run jobs in the data project).
 ### 4. GitHub Actions Workload Identity Federation
 
 ```bash
-PROJECT_ID=maddictdata
+PROJECT_ID=your-gcp-project
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 DEPLOY_SA=deployer@${PROJECT_ID}.iam.gserviceaccount.com
 REPO=your-org/your-repo
@@ -290,10 +290,10 @@ and internal ingress. Manual equivalent:
 ```bash
 gcloud run deploy h3-analysis \
   --source . --region your-region \
-  --service-account h3-analysis-run@maddictdata.iam.gserviceaccount.com \
+  --service-account h3-analysis-run@your-gcp-project.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --ingress internal-and-cloud-load-balancing \
-  --set-env-vars ^@@^BIGQUERY_PROJECT_ID=maddictdata@@BIGQUERY_DATASET=OOH_Analysis@@BIGQUERY_OVERALL_INDEX_TABLE=h3_analysis_indexed_filtered@@BIGQUERY_VOLUME_INDEX_TABLE=h3_analysis_volume_index_filtered@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=h3_analysis_exclusivity_index_filtered@@BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE=h3_analysis_indexed_filtered_day_sections@@BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE=h3_analysis_volume_index_filtered_day_sections@@BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE=h3_analysis_exclusivity_index_filtered_day_sections
+  --set-env-vars ^@@^BIGQUERY_PROJECT_ID=your-gcp-project@@BIGQUERY_DATASET=your_dataset@@BIGQUERY_OVERALL_INDEX_TABLE=overall_index_table@@BIGQUERY_VOLUME_INDEX_TABLE=volume_index_table@@BIGQUERY_EXCLUSIVITY_INDEX_TABLE=exclusivity_index_table@@BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE=overall_index_day_sections_table@@BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE=volume_index_day_sections_table@@BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE=exclusivity_index_day_sections_table
 ```
 
 ### 6. Internal-only access (Cloud Run auth + IAP)
@@ -317,14 +317,14 @@ gcloud run deploy h3-analysis \
 
 | Variable | Value |
 | --- | --- |
-| `BIGQUERY_PROJECT_ID` | e.g. `maddictdata` |
-| `BIGQUERY_DATASET` | e.g. `OOH_Analysis` |
-| `BIGQUERY_OVERALL_INDEX_TABLE` | e.g. `h3_analysis_indexed_filtered` |
-| `BIGQUERY_VOLUME_INDEX_TABLE` | e.g. `h3_analysis_volume_index_filtered` |
-| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | e.g. `h3_analysis_exclusivity_index_filtered` |
-| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | e.g. `h3_analysis_indexed_filtered_day_sections` |
-| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | e.g. `h3_analysis_volume_index_filtered_day_sections` |
-| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | e.g. `h3_analysis_exclusivity_index_filtered_day_sections` |
+| `BIGQUERY_PROJECT_ID` | e.g. `your-gcp-project` |
+| `BIGQUERY_DATASET` | e.g. `your_dataset` |
+| `BIGQUERY_OVERALL_INDEX_TABLE` | e.g. `overall_index_table` |
+| `BIGQUERY_VOLUME_INDEX_TABLE` | e.g. `volume_index_table` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | e.g. `exclusivity_index_table` |
+| `BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE` | e.g. `overall_index_day_sections_table` |
+| `BIGQUERY_VOLUME_INDEX_DAY_SECTIONS_TABLE` | e.g. `volume_index_day_sections_table` |
+| `BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE` | e.g. `exclusivity_index_day_sections_table` |
 | `PORT` | set automatically by Cloud Run |
 
 No credentials are set as env vars; the runtime service account provides them.
