@@ -17,3 +17,7 @@ gcp-key*.json
 # Page 2 is now BigQuery-first (see CLAUDE.md); the rule is kept only in case
 # a real per-metric day-section CSV export is ever dropped there again.
 data/map_2/*.csv
+# Local production exports for the removed map_1 (hourly user_count) and map_3
+# (overall analysis index) views. Kept on disk, never committed.
+data/map_1/*.csv
+data/map_3/*.csv
