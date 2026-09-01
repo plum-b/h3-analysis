@@ -5,14 +5,19 @@ import numpy as np
 import pandas as pd
 
 from h3_analysis.colors import (
+    METRIC_LABELS,
     METRIC_RAMPS,
+    METRIC_SCALES,
+    ORANGE_RAMP,
     colors_for,
     format_value,
+    hex_to_rgb,
     legend_html,
     normalize,
     ramp_for,
 )
 from h3_analysis.data import (
+    ALL_INDEX_METRICS,
     INDEX_METRICS,
     PAGE2_METRICS,
     DataValidationError,
@@ -292,12 +297,55 @@ class DaySectionAggregationTests(unittest.TestCase):
 
 
 class ColorScaleTests(unittest.TestCase):
-    def test_each_metric_has_its_own_single_hue_ramp(self):
-        ramps = {metric: METRIC_RAMPS[metric] for metric in INDEX_METRICS}
-        self.assertEqual(len(set(ramps.values())), len(INDEX_METRICS))
+    def test_every_metric_shares_the_orange_ramp(self):
+        """One hue for all three metrics, on both pages.
+
+        Orange reads best against the light detailed basemap, so hue is held
+        constant and carries no meaning; scale and legend keep the metrics
+        distinguishable.
+        """
+        for metric in ALL_INDEX_METRICS:
+            with self.subTest(metric=metric):
+                self.assertIs(METRIC_RAMPS[metric], ORANGE_RAMP)
+        self.assertEqual(
+            len({METRIC_RAMPS[metric] for metric in ALL_INDEX_METRICS}), 1
+        )
+
+    def test_every_ramp_step_is_actually_orange(self):
+        """Guards against a stray blue/teal step being reintroduced."""
+        for step in ORANGE_RAMP:
+            with self.subTest(step=step):
+                red, green, blue = hex_to_rgb(step)
+                self.assertGreater(red, green)
+                self.assertGreaterEqual(green, blue)
+
+    def test_ramp_keeps_contrast_against_a_light_basemap(self):
+        """The dark end must stay dark enough to read over pale map tiles."""
+        light_end = sum(hex_to_rgb(ORANGE_RAMP[0]))
+        dark_end = sum(hex_to_rgb(ORANGE_RAMP[-1]))
+        self.assertLess(dark_end, light_end / 2)
+
+    def test_ramp_lightness_is_monotonic(self):
+        totals = [sum(hex_to_rgb(step)) for step in ORANGE_RAMP]
+        self.assertEqual(totals, sorted(totals, reverse=True))
+
+    def test_shared_hue_does_not_merge_the_metric_scales(self):
+        """A shared ramp must not imply a shared range or scale."""
+        self.assertEqual(METRIC_SCALES["overall_index"], "linear")
+        self.assertEqual(METRIC_SCALES["exclusivity_index"], "linear")
+        self.assertEqual(METRIC_SCALES["volume_index"], "log")
+
+        values = pd.Series([1e-4, 1e-3, 1e-2, 1e-1, 1.0])
+        linear = colors_for(values, "overall_index", dark_basemap=False)
+        same_scale = colors_for(values, "exclusivity_index", dark_basemap=False)
+        logarithmic = colors_for(values, "volume_index", dark_basemap=False)
+        # Same ramp and same scale -> identical colors.
+        self.assertEqual(linear, same_scale)
+        # Same ramp, different scale -> the value-to-color mapping still differs.
+        self.assertNotEqual(linear, logarithmic)
 
     def test_dark_basemap_reverses_the_ramp(self):
-        for metric in INDEX_METRICS:
+        for metric in ALL_INDEX_METRICS:
             with self.subTest(metric=metric):
                 light = ramp_for(metric, dark_basemap=False)
                 dark = ramp_for(metric, dark_basemap=True)
@@ -363,6 +411,16 @@ class ColorScaleTests(unittest.TestCase):
         self.assertIn("0.100", html)
         self.assertIn("0.900", html)
         self.assertIn("linear-gradient", html)
+
+    def test_legend_names_the_metric_and_its_scale_for_every_metric(self):
+        """With one shared hue, the legend is what tells the metrics apart."""
+        for metric in ALL_INDEX_METRICS:
+            with self.subTest(metric=metric):
+                html = legend_html(metric, 0.1, 0.9, dark_basemap=False)
+                self.assertIn(METRIC_LABELS[metric], html)
+                self.assertIn(f"({METRIC_SCALES[metric]} scale)", html)
+                self.assertIn(ORANGE_RAMP[0], html)
+                self.assertIn(ORANGE_RAMP[-1], html)
 
 
 class ThirdMapRemovalTests(unittest.TestCase):

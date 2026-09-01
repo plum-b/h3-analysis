@@ -1,13 +1,20 @@
 """Sequential color ramps and scaling for the index-like maps.
 
-Each metric gets its own single-hue ramp (light -> dark) because the metrics
-measure different things and must never be read against a shared scale.
-The ramps follow the project's sequential-color rule: one hue per magnitude
-encoding, stepped monotonically in lightness.
+Every metric is drawn with the **same** orange ramp (light -> dark), on both
+pages. Orange reads best against the light detailed basemap, so using it
+everywhere keeps the map legible whichever metric is on screen and stops the
+hue itself carrying meaning it never had.
 
-``exclusivity_index`` and ``overall_index`` use a linear scale. ``volume_index``
-spans roughly four orders of magnitude, so a linear scale would collapse almost
-every cell onto the lightest step; it uses a log scale instead.
+What still separates the metrics is the part that is actually quantitative:
+each keeps its own scale and its own legend. ``exclusivity_index`` and
+``overall_index`` use a linear scale; ``volume_index`` spans roughly four
+orders of magnitude, so a linear scale would collapse almost every cell onto
+the lightest step and it uses a log scale instead. The legend always names the
+metric and the scale it was drawn with, so a shared hue can never be mistaken
+for a shared range - the ramp is normalized per metric, per selection.
+
+The ramp follows the sequential-color rule: one hue per magnitude encoding,
+stepped monotonically in lightness.
 """
 
 from __future__ import annotations
@@ -15,29 +22,31 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# Blue ramp, 100 -> 700 (documented sequential hue).
-BLUE_RAMP = (
-    "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
-    "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
-)
-
-# Orange ramp, derived at the same lightness profile as BLUE_RAMP so the two
-# sequential contexts read as equals. Single hue (~40.7 deg), monotone lightness.
+# The shared ramp for every metric. Single hue (~40.7 deg), monotone lightness,
+# unchanged from when it belonged to volume_index alone - the step values are
+# reused verbatim so no cell changes color for a given normalized position.
 ORANGE_RAMP = (
     "#fbd7ca", "#f5c4b2", "#f2b098", "#eb9c7f", "#e68764", "#df7249", "#d95923",
     "#c94908", "#b44005", "#9f3600", "#8a2e00", "#752600", "#621e00",
 )
 
-# Teal-green ramp for the overall index; same lightness profile as the others
-# so the three metrics read as equal peers.
+# Retained at the same lightness profile as ORANGE_RAMP, but not currently
+# mapped to any metric. Kept so a per-metric scheme can be restored without
+# re-deriving the profile.
+BLUE_RAMP = (
+    "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+    "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
+)
 TEAL_GREEN_RAMP = (
     "#c5ebe3", "#addfd5", "#94d3c6", "#7cc7b8", "#63bbaa", "#4bae9b", "#32a28d",
     "#2a917e", "#257f6f", "#1f6d60", "#1a5c50", "#144b41", "#0f3a32",
 )
 
+# One ramp for every metric, on both pages. The per-metric entries stay so a
+# metric can be re-pointed at its own hue without touching call sites.
 METRIC_RAMPS = {
-    "overall_index": TEAL_GREEN_RAMP,
-    "exclusivity_index": BLUE_RAMP,
+    "overall_index": ORANGE_RAMP,
+    "exclusivity_index": ORANGE_RAMP,
     "volume_index": ORANGE_RAMP,
 }
 
@@ -81,6 +90,7 @@ def hex_to_rgb(value: str) -> list[int]:
 def ramp_for(metric: str, dark_basemap: bool) -> tuple[str, ...]:
     """Return the ramp oriented so high values stay visible on the basemap.
 
+    Every metric resolves to the same orange ramp; only the orientation varies.
     On a dark basemap the ramp is reversed: the darkest steps would otherwise
     sink into the background, so high magnitude takes the light end instead.
     """

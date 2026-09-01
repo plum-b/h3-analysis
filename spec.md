@@ -195,8 +195,10 @@ and adds a day-part control.
 
 ### Presentation and errors
 
-- Each metric has its own single-hue sequential ramp, shared with Page 1: blue
-  for exclusivity, orange for volume, teal-green for overall.
+- Every metric uses the same orange single-hue sequential ramp, on both pages:
+  it reads best against the light detailed basemap, and hue carries no meaning
+  of its own. The metrics stay distinguishable through their scale and legend,
+  which always names the metric and whether it was drawn linear or log.
 - `exclusivity_index` and `overall_index` use a linear scale; `volume_index`
   spans about four orders of magnitude and uses a log scale.
 - The ramp direction follows the basemap; percentile clipping (p2/p98) keeps a
