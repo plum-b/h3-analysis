@@ -38,6 +38,13 @@ import streamlit as st
 # Fallback center used only when no cells are on screen.
 UAE_LAT, UAE_LON = 24.0, 54.0
 
+# Streamlit renders a deck.gl chart 500px tall by default, which leaves the UAE
+# grid cramped and forces constant panning. Twice that shows a whole emirate at
+# a readable zoom. Height only - the chart still stretches to the column width,
+# so the surrounding layout and column proportions are unchanged.
+STREAMLIT_DEFAULT_MAP_HEIGHT = 500
+MAP_HEIGHT = STREAMLIT_DEFAULT_MAP_HEIGHT * 2
+
 BASEMAP_DETAILED = "Streets + terrain"
 BASEMAP_ROAD = "Street Map"
 BASEMAP_DARK = "Dark"
@@ -144,4 +151,5 @@ def render_h3_map(
             tooltip={"text": tooltip_text},
         ),
         width="stretch",
+        height=MAP_HEIGHT,
     )

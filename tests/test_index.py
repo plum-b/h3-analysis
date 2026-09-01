@@ -544,5 +544,43 @@ class TwoHourSampleFileTests(unittest.TestCase):
         )
 
 
+class MapHeightTests(unittest.TestCase):
+    """Both pages render through the one shared helper, so height is set once."""
+
+    def test_map_height_is_at_least_double_the_streamlit_default(self):
+        from h3_analysis.mapping import MAP_HEIGHT, STREAMLIT_DEFAULT_MAP_HEIGHT
+
+        self.assertGreaterEqual(MAP_HEIGHT, STREAMLIT_DEFAULT_MAP_HEIGHT * 2)
+
+    def test_renderer_sets_the_height_and_leaves_width_stretching(self):
+        from unittest.mock import patch
+
+        from h3_analysis import mapping
+
+        frame = pd.DataFrame({"h3_id": [], "value": []})
+        with patch.object(mapping.st, "pydeck_chart") as chart:
+            mapping.render_h3_map(frame, "[0, 0, 0]", "", "dark")
+
+        self.assertEqual(chart.call_count, 1)
+        kwargs = chart.call_args.kwargs
+        self.assertEqual(kwargs["height"], mapping.MAP_HEIGHT)
+        # Width must keep filling the column - only the height changed.
+        self.assertEqual(kwargs["width"], "stretch")
+
+    def test_both_pages_render_through_the_shared_helper(self):
+        """A per-page copy of the renderer would silently skip the new height."""
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for page in (
+            "pages/1_Two-Hour_Index_Analysis.py",
+            "pages/2_Day-Part_Index_Analysis.py",
+        ):
+            with self.subTest(page=page):
+                source = (root / page).read_text(encoding="utf-8")
+                self.assertIn("render_h3_map", source)
+                self.assertNotIn("st.pydeck_chart", source)
+
+
 if __name__ == "__main__":
     unittest.main()
