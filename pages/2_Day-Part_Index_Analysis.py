@@ -1,4 +1,4 @@
-"""Page 2 - Index analysis map (day-part, BigQuery).
+"""Page 2 - Day-part index analysis map (BigQuery).
 
 Page 2 shows one index metric at a time - Overall, Volume or Exclusivity -
 each stored in its own "*_day_sections" BigQuery table with the schema
@@ -56,13 +56,13 @@ from h3_analysis.data import (
 from h3_analysis.mapping import (
     BASEMAP_OPTIONS,
     basemap_style,
+    is_dark_basemap,
     render_h3_map,
     segment_checkboxes,
 )
 
-st.set_page_config(page_title="H3 Analysis - Index (Day-part)", page_icon="🧭", layout="wide")
-
 # Local-development convenience; deployed environments inject the real vars.
+# ``app.py`` owns st.set_page_config; a page script must not call it again.
 load_local_env()
 
 LOCAL_SAMPLE_FILE = "data/sample_index_day_sections.csv"
@@ -226,7 +226,7 @@ def local_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
     return aggregated, selected_segments, selected_day_part, source_name
 
 
-st.title("Index analysis - Day part")
+st.title("Day-Part Index Analysis")
 st.caption(
     "Page 2 of 2. Index analysis by location, audience segment and day-part "
     "(Morning / Noon / After noon / Night / Other)."
@@ -265,6 +265,7 @@ except (DataValidationError, pd.errors.ParserError, UnicodeDecodeError) as error
 
 map_style = st.radio("Basemap", BASEMAP_OPTIONS, horizontal=True, key="basemap")
 style_url = basemap_style(map_style)
+dark_basemap = is_dark_basemap(map_style)
 
 st.subheader(f"{METRIC_LABELS[metric]} by H3 cell - {selected_day_part}")
 
@@ -274,7 +275,7 @@ if cells.empty:
 
 values = cells[metric]
 cells = cells.assign(
-    fill_color=colors_for(values, metric, map_style == "Dark"),
+    fill_color=colors_for(values, metric, dark_basemap),
     metric_label=[format_value(value, metric) for value in values],
 )
 
@@ -295,9 +296,7 @@ render_h3_map(
     style_url,
 )
 st.markdown(
-    legend_html(
-        metric, float(values.min()), float(values.max()), map_style == "Dark"
-    ),
+    legend_html(metric, float(values.min()), float(values.max()), dark_basemap),
     unsafe_allow_html=True,
 )
 st.caption(

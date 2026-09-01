@@ -1,10 +1,34 @@
 """Shared PyDeck rendering helpers used by both map pages.
 
 Keeping the H3 layer, view centering, and basemap choices in one place means the
-user-count page and the index page stay visually consistent.
+two index pages stay visually consistent.
+
+Basemaps
+--------
+The default basemap is OpenFreeMap Liberty, a detailed OpenMapTiles style:
+111 layers including building footprints, 28 road classes, POI and place
+labels, and a Natural Earth shaded-relief source that gives real terrain shading
+at low zoom. Streets and buildings therefore read through the translucent H3
+layer as you zoom in, and the relief is genuine imagery rather than a road map
+relabelled as terrain.
+
+It is token-free, so nothing here needs a credential. ``H3_BASEMAP_STYLE_URL``
+overrides it with any MapLibre style.json URL - that is where a deployment
+points at its own provider (MapTiler Outdoor, a self-hosted style, anything with
+its own key). Keys belong in that environment variable or in
+``.streamlit/secrets.toml``, never in this file.
+
+Anything malformed, unavailable, or unrecognised falls back to the hosted CARTO
+Voyager style, which is always reachable: a basemap must never be the reason the
+map fails to draw. Note Streamlit renders deck.gl from JSON and requires
+``mapStyle`` to be a style *URL* - an inline style object raises
+"e.mapStyle?.indexOf is not a function" in the browser - so every value here is
+a string.
 """
 
 from __future__ import annotations
+
+import os
 
 import h3
 import pandas as pd
@@ -14,15 +38,52 @@ import streamlit as st
 # Fallback center used only when no cells are on screen.
 UAE_LAT, UAE_LON = 24.0, 54.0
 
-BASEMAP_OPTIONS = ("Dark", "Street Map")
+BASEMAP_DETAILED = "Streets + terrain"
+BASEMAP_ROAD = "Street Map"
+BASEMAP_DARK = "Dark"
+
+# Ordered most- to least-detailed; the first entry is what a page shows first.
+BASEMAP_OPTIONS = (BASEMAP_DETAILED, BASEMAP_ROAD, BASEMAP_DARK)
+
+ENV_DETAILED_STYLE = "H3_BASEMAP_STYLE_URL"
+
+# Token-free default: streets, buildings, labels and shaded relief.
+DEFAULT_DETAILED_STYLE = "https://tiles.openfreemap.org/styles/liberty"
+
+# Always-reachable fallback for an unknown label or a malformed override.
+FALLBACK_STYLE = pdk.map_styles.CARTO_ROAD
+
+
+def _valid_style_url(url: str) -> bool:
+    """Accept only an https style URL - no credentials smuggled in as a path."""
+    return url.strip().startswith("https://")
+
+
+def detailed_style_url() -> str:
+    """The detailed basemap style URL, honouring the environment override."""
+    override = (os.environ.get(ENV_DETAILED_STYLE) or "").strip()
+    if override and _valid_style_url(override):
+        return override
+    return DEFAULT_DETAILED_STYLE
 
 
 def basemap_style(choice: str) -> str:
     """Translate a basemap label into a deck.gl style URL."""
-    return pdk.map_styles.DARK if choice == "Dark" else pdk.map_styles.CARTO_ROAD
+    if choice == BASEMAP_DETAILED:
+        return detailed_style_url()
+    if choice == BASEMAP_DARK:
+        return pdk.map_styles.DARK
+    if choice == BASEMAP_ROAD:
+        return pdk.map_styles.CARTO_ROAD
+    return FALLBACK_STYLE
 
 
-def segment_checkboxes(segment_values: list[str]) -> list[str]:
+def is_dark_basemap(choice: str) -> bool:
+    """Whether a basemap needs the dark-background color ramp."""
+    return choice == BASEMAP_DARK
+
+
+def segment_checkboxes(segment_values: list) -> list:
     """Render the shared sidebar segment checkboxes; stop if none are selected.
 
     Shared by both pages so "select all" and per-segment behavior stay
@@ -43,7 +104,7 @@ def segment_checkboxes(segment_values: list[str]) -> list[str]:
     return selected
 
 
-def map_center(frame: pd.DataFrame) -> tuple[float, float]:
+def map_center(frame: pd.DataFrame) -> tuple:
     """Center the view on the displayed cells, falling back to the UAE."""
     if frame.empty:
         return UAE_LAT, UAE_LON
@@ -64,7 +125,9 @@ def render_h3_map(
         get_hexagon="h3_id",
         get_fill_color=fill_color,
         pickable=True,
-        opacity=0.65,
+        # Resolution-9 cells tile a city solidly, so the layer has to stay
+        # quite translucent for the streets and buildings underneath to read.
+        opacity=0.45,
         # Flat cells: colour alone carries the value, no extrusion.
         extruded=False,
         stroked=False,

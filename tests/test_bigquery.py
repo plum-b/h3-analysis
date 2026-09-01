@@ -5,10 +5,13 @@ import pandas as pd
 
 from h3_analysis.bigquery_source import (
     BigQueryConfigError,
+    billing_project,
     build_day_parts_query,
     build_day_section_index_query,
     build_index_query,
     build_segments_query,
+    build_two_hour_periods_query,
+    coerce_two_hour_period,
     day_section_table_fqn,
     index_table_fqn,
 )
@@ -81,13 +84,16 @@ class QueryConstructionTests(unittest.TestCase):
 
     def test_index_query_is_parameterized_and_aggregates(self):
         sql, params = build_index_query(
-            self.fqn, "volume_index", ["Families", "HNWI"]
+            self.fqn, "volume_index", ["Families", "HNWI"], 14
         )
         self.assertIn("AVG(volume_index) AS volume_index", sql)
         self.assertIn("GROUP BY h3_id", sql)
         self.assertIn("@segments", sql)
         self.assertIn(f"`{self.fqn}`", sql)
-        self.assertEqual(params, {"segments": ["Families", "HNWI"]})
+        self.assertEqual(
+            params,
+            {"segments": ["Families", "HNWI"], "two_hour_period": 14},
+        )
 
     def test_averages_in_two_steps_not_one(self):
         """Live tables repeat each (h3_id, segment) pair ~8x, unevenly.
@@ -96,8 +102,8 @@ class QueryConstructionTests(unittest.TestCase):
         whichever pair carries more duplicate rows - that changed 48.6% of
         cells (up to 108% relative) against the real data.
         """
-        sql, _ = build_index_query(self.fqn, "overall_index", ["Families"])
-        self.assertIn("GROUP BY h3_id, segment", sql)
+        sql, _ = build_index_query(self.fqn, "overall_index", ["Families"], 8)
+        self.assertIn("GROUP BY h3_id, segment, hour_bucket", sql)
         self.assertIn("per_pair", sql)
         # The outer average must read the collapsed pairs, not the raw table.
         outer = sql.split("per_pair AS (")[1].split(")")[-1]
@@ -109,30 +115,84 @@ class QueryConstructionTests(unittest.TestCase):
 
         for metric in PAGE1_METRICS:
             with self.subTest(metric=metric):
-                sql, _ = build_index_query(self.fqn, metric, ["Families"])
-                self.assertIn("GROUP BY h3_id, segment", sql)
+                sql, params = build_index_query(
+                    self.fqn, metric, ["Families"], 6
+                )
+                self.assertIn("GROUP BY h3_id, segment, hour_bucket", sql)
                 self.assertIn(f"AVG({metric}) AS {metric}", sql)
+                # The two-hour filter applies to every metric, not just one.
+                self.assertIn("hour_bucket = @two_hour_period", sql)
+                self.assertEqual(params["two_hour_period"], 6)
 
     def test_segment_values_never_appear_in_sql_text(self):
         sql, _ = build_index_query(
-            self.fqn, "overall_index", ["Fam'ilies", "HN;WI"]
+            self.fqn, "overall_index", ["Fam'ilies", "HN;WI"], 22
         )
         self.assertNotIn("Fam'ilies", sql)
         self.assertNotIn("HN;WI", sql)
 
     def test_unknown_metric_rejected(self):
         with self.assertRaises(ValueError):
-            build_index_query(self.fqn, "drop_table", ["Families"])
+            build_index_query(self.fqn, "drop_table", ["Families"], 0)
 
     def test_empty_segments_rejected(self):
         with self.assertRaises(ValueError):
-            build_index_query(self.fqn, "volume_index", [])
+            build_index_query(self.fqn, "volume_index", [], 0)
+
+    def test_two_hour_period_is_a_parameter_never_sql_text(self):
+        """A hostile period must reach BigQuery as a value or not at all."""
+        with self.assertRaises(ValueError):
+            build_index_query(
+                self.fqn, "volume_index", ["Families"], "0 OR 1=1; --"
+            )
+        sql, params = build_index_query(self.fqn, "volume_index", ["Families"], 12)
+        self.assertNotIn("12", sql)
+        self.assertEqual(params["two_hour_period"], 12)
+
+    def test_two_hour_period_accepts_integral_values_only(self):
+        self.assertEqual(coerce_two_hour_period("8"), 8)
+        self.assertEqual(coerce_two_hour_period(8.0), 8)
+        for bad in ("morning", 3.5, None, True, ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    coerce_two_hour_period(bad)
+
+    def test_two_hour_periods_query_lists_the_column(self):
+        sql = build_two_hour_periods_query(self.fqn)
+        self.assertIn("SELECT DISTINCT hour_bucket", sql)
+        self.assertNotIn("segment", sql)
+        # The 0/2/.../22 domain comes from the table, never from the code.
+        self.assertNotIn("22", sql)
 
     def test_segments_query_selects_only_segment(self):
         sql = build_segments_query(self.fqn)
         self.assertIn("SELECT DISTINCT segment", sql)
         self.assertNotIn("hour_bucket", sql)
         self.assertNotIn("user_count", sql)
+
+
+class BillingProjectTests(unittest.TestCase):
+    """Jobs must be billed to the configured project.
+
+    Falling through to the ambient ADC project produces a
+    "does not have bigquery.jobs.create permission in project ..." error that
+    names a project nobody configured, while the tables themselves are readable.
+    """
+
+    def test_defaults_to_the_data_project(self):
+        self.assertEqual(
+            billing_project({"BIGQUERY_PROJECT_ID": "maddictdata"}), "maddictdata"
+        )
+
+    def test_explicit_billing_project_wins(self):
+        env = {
+            "BIGQUERY_PROJECT_ID": "maddictdata",
+            "BIGQUERY_BILLING_PROJECT": "billing-project",
+        }
+        self.assertEqual(billing_project(env), "billing-project")
+
+    def test_unset_returns_empty_so_adc_default_applies(self):
+        self.assertEqual(billing_project({}), "")
 
 
 class DayFqnTests(unittest.TestCase):
@@ -237,6 +297,15 @@ class DaySectionQueryConstructionTests(unittest.TestCase):
     def test_empty_hour_bucket_rejected(self):
         with self.assertRaises(ValueError):
             build_day_section_index_query(self.fqn, "volume_index", ["Families"], "")
+
+    def test_page2_has_no_two_hour_period_filter(self):
+        """Page 2 slices by day-part only; the two-hour slicer is Page 1 only."""
+        sql, params = build_day_section_index_query(
+            self.fqn, "overall_index", ["Families"], "Morning"
+        )
+        self.assertNotIn("two_hour_period", sql)
+        self.assertNotIn("two_hour_period", params)
+        self.assertEqual(set(params), {"segments", "hour_bucket"})
 
     def test_day_parts_query_selects_only_hour_bucket(self):
         sql = build_day_parts_query(self.fqn)

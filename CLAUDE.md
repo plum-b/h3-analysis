@@ -6,16 +6,21 @@ This repository contains a Streamlit application for exploring H3 audience data
 on a map, focused on the UAE. It has **exactly two map pages**, each on its own
 Streamlit page because they use different data and analysis logic:
 
-- **Page 1 — `app.py` — index-analysis map.** Filters by audience segment only
-  (no time column). A radio switches the metric between `overall_index`,
-  `volume_index` and `exclusivity_index`; each metric is a **separate BigQuery
-  table** with schema `h3_id` / `segment` / `<metric>`; each `(h3_id, segment)`
-  pair is **repeated** (~8x on the live tables, unevenly). The map averages in
-  **two steps**: within each pair, then across the selected segments. **Data source is BigQuery.** A local CSV (upload or the
-  synthetic `data/sample_index.csv`) exists only as an explicit development
+- **Page 1 — `pages/1_Two-Hour_Index_Analysis.py` — "Two-Hour Index
+  Analysis".** Filters by audience segment **and one two-hour period of the
+  day**. A radio switches the metric between `overall_index`, `volume_index`
+  and `exclusivity_index`; each metric is a **separate BigQuery table** with
+  schema `h3_id` / `segment` / `<metric>` / `hour_bucket`, where `hour_bucket`
+  is an **INT64 two-hour period** (0, 2, 4 … 22). Each `(h3_id, segment)` pair
+  carries ~8.4 rows because it spans the twelve periods; each
+  `(h3_id, segment, hour_bucket)` triple appears exactly once. The map filters
+  to one period, then averages in **two steps**: within each
+  `(h3_id, segment, hour_bucket)` group, then across the selected segments.
+  **Data source is BigQuery.** A local CSV (upload or the synthetic
+  `data/sample_index_two_hours.csv`) exists only as an explicit development
   fallback; production never reads a production CSV.
-- **Page 2 — `pages/2_Index_Analysis.py` — index-analysis map (day-part).**
-  Filters by audience segment **and day-part**. A radio switches the metric
+- **Page 2 — `pages/2_Day-Part_Index_Analysis.py` — "Day-Part Index
+  Analysis".** Filters by audience segment **and day-part**. A radio switches the metric
   between the same three names (`overall_index`, `volume_index`,
   `exclusivity_index`); each metric is a **separate `*_day_sections` BigQuery
   table** with schema `h3_id` / `segment` / `<metric>` / `hour_bucket`. Unlike
@@ -30,8 +35,11 @@ Never join the metric tables/files on `h3_id` + `segment`.
 ### Current phase and future plan
 
 - **Both pages are now implemented on BigQuery**: Page 1 on the three
-  `*_filtered` index tables, Page 2 on the three `*_filtered_day_sections`
-  tables.
+  `*_filtered` index tables sliced to one two-hour period, Page 2 on the three
+  `*_filtered_day_sections` tables filtered to one day-part.
+- The two pages read the same column name, `hour_bucket`, with different types
+  and meanings: INT64 two-hour periods on Page 1, STRING day-part labels on
+  Page 2. Never mix them, and never add the two-hour slicer to Page 2.
 - Add further tables/pages only when their approved schema and purpose are
   provided. The former CSV "Overall analysis index" (`data/map_3`) map and the
   hourly `user_count` map have been **removed**; `overall_index` now exists as a
@@ -63,7 +71,7 @@ On PowerShell, activate the environment with:
 
 ## Data contract
 
-### Page 1 — BigQuery (three index tables)
+### Page 1 — BigQuery (three two-hour index tables)
 
 Production reads configuration-driven fully qualified BigQuery tables, one per
 metric. Never hard-code a project id, dataset, table, credentials, or SQL
@@ -76,7 +84,16 @@ filter values.
 | `BIGQUERY_VOLUME_INDEX_TABLE` | table for `volume_index` |
 | `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | table for `exclusivity_index` |
 | `BIGQUERY_<METRIC>_TABLE_FQN` | optional per-metric full-FQN override |
+| `BIGQUERY_BILLING_PROJECT` | project the query **jobs** are billed to; defaults to `BIGQUERY_PROJECT_ID` |
+| `H3_BASEMAP_STYLE_URL` | MapLibre style.json URL for the detailed basemap |
 | `H3_DATA_SOURCE=local` | default the sidebar to the local CSV fallback |
+
+Never construct `bigquery.Client()` without a project. The billing project is
+resolved by `bigquery_source.billing_project()`; leaving it to Application
+Default Credentials bills jobs to whatever project the local `gcloud` config
+happens to point at, producing a `bigquery.jobs.create` permission error that
+names a project appearing nowhere in this repository — while the tables
+themselves are perfectly readable.
 
 Current values live in the committed `.env.example` (project `maddictdata`,
 dataset `OOH_Analysis`, tables `h3_analysis_indexed_filtered`,
@@ -92,24 +109,34 @@ Each table's columns:
 | `h3_id` | STRING | Valid H3 cell index |
 | `segment` | STRING | Audience/category used by the checkboxes |
 | `<metric>` | numeric ≥ 0 | Column named exactly `overall_index` / `volume_index` / `exclusivity_index` |
+| `hour_bucket` | INT64 | **Two-hour period** of the day: 0, 2, 4 … 22 |
 
-There is **no time / hour column**. Each `(h3_id, segment)` pair is **repeated**
-— ~8.4 rows per pair on the live tables, and the count varies by pair, so the
-duplication is uneven.
+Measured facts (BigQuery, read-only), identical on all three tables:
+
+- ~1.26M rows, 3 segments, and exactly **twelve** `hour_bucket` values
+  (0, 2, 4 … 22); no NULLs.
+- Each `(h3_id, segment, hour_bucket)` triple appears **exactly once**
+  (max repeat count = 1). The ~8.4 rows per `(h3_id, segment)` pair are the
+  periods that pair appears in — not undifferentiated duplicates.
+- One period covers ~39.5k cells for a single segment.
 
 Rules:
 
 - The segment filter is always passed as a query parameter
-  (`@segments` ARRAY<STRING>). Never interpolate a user-controlled value into
-  SQL. Only the validated table FQN and the metric name (checked against
-  `PAGE1_METRICS`) reach the SQL text.
-- Aggregate in BigQuery in **two steps**: `AVG` grouped by `(h3_id, segment)` in
-  a CTE, then `AVG` of that grouped by `h3_id`. Never collapse this into one
-  `AVG ... GROUP BY h3_id` — that is a weighted average dominated by whichever
-  pair carries more duplicate rows; measured on the live tables it changed 48.6%
-  of cells, by up to 108% relative. Return only `h3_id` and the metric.
+  (`@segments` ARRAY<STRING>) and the period as `@two_hour_period`
+  (INT64 scalar), validated by `coerce_two_hour_period` before it is bound.
+  Never interpolate a user-controlled value into SQL. Only the validated table
+  FQN and the metric name (checked against `PAGE1_METRICS`) reach the SQL text.
+- Always filter to **exactly one** two-hour period before aggregating. The
+  slicer offers whatever periods the table contains — the 0/2/…/22 domain is
+  never hard-coded.
+- Aggregate in BigQuery in **two steps**: `AVG` grouped by
+  `(h3_id, segment, hour_bucket)` in a CTE, then `AVG` of that grouped by
+  `h3_id`. Never collapse this into one `AVG ... GROUP BY h3_id` — that is a
+  row-weighted average in which a segment contributing more rows dominates the
+  cell. Return only `h3_id` and the metric.
 - Cache query results with `st.cache_data` keyed by table FQN + metric +
-  segments.
+  segments + period.
 - Credentials: Application Default Credentials only. Local dev uses
   `gcloud auth application-default login`; Cloud Run uses its attached service
   account. Never commit a service-account JSON key.
@@ -117,10 +144,15 @@ Rules:
 
 ### Page 1 — local development fallback
 
-The committed synthetic `data/sample_index.csv` (columns `h3_id`, `segment`,
-`overall_index`, `volume_index`, `exclusivity_index`), or a sidebar CSV upload
-with `h3_id`, `segment` and the active metric column. Production must not depend
-on a production CSV.
+The committed synthetic `data/sample_index_two_hours.csv` (columns `h3_id`,
+`segment`, `hour_bucket`, `overall_index`, `volume_index`,
+`exclusivity_index`; 250 resolution-9 UAE cells x 3 segments x 12 two-hour
+periods), or a sidebar CSV upload with the same columns. Production must not
+depend on a production CSV.
+
+`data/sample_index.csv` has **no `hour_bucket` column** and is a 45-cell
+resolution-8 sample — it no longer satisfies Page 1 and must not be pointed at
+either page.
 
 Never commit production exports, credentials, personal data, or Streamlit
 secrets.
@@ -226,8 +258,12 @@ fallback with a resolution-9 synthetic file that matches the real schema.
 
 ## Implementation conventions
 
-- Keep `app.py` as the entry point and Page 1. Additional pages live in
-  `pages/`.
+- Keep `app.py` as the entry point. It is a thin router: it calls
+  `st.set_page_config` once and registers both pages with `st.navigation`, which
+  is what sets their sidebar labels. Page bodies live in `pages/` and must not
+  call `st.set_page_config` themselves. Streamlit names the entry script in the
+  sidebar after its *filename*, so while Page 1 lived in `app.py` the navigation
+  read "app" whatever `page_title` said.
 - Reusable data-access and helper logic lives outside the UI:
   `h3_analysis/bigquery_source.py` (Streamlit-free, unit tested),
   `h3_analysis/data.py` (validation/aggregation),
@@ -245,8 +281,17 @@ fallback with a resolution-9 synthetic file that matches the real schema.
   currently displayed H3 cells.
 - Do not add a map-provider token to source code. Use `.streamlit/secrets.toml`
   or environment variables for secrets.
-- A true satellite or terrain basemap requires a compatible provider and may
-  require an API token. CARTO Voyager is a road basemap, not terrain imagery.
+- The default basemap is OpenFreeMap Liberty (`H3_BASEMAP_STYLE_URL` overrides
+  it): an OpenMapTiles style with building footprints, 28 road classes, POI and
+  place labels, and a Natural Earth shaded-relief source, so it carries real
+  relief rather than being a road basemap relabelled as terrain. It needs no
+  token. CARTO Voyager remains the always-reachable fallback.
+- Streamlit renders deck.gl from JSON and requires `mapStyle` to be a style
+  **URL string**. Passing an inline MapLibre style object fails in the browser
+  with `e.mapStyle?.indexOf is not a function`, so basemap choices must resolve
+  to URLs.
+- Resolution-9 cells tile a city solidly. Keep the H3 layer near `opacity=0.45`
+  so streets and buildings stay readable underneath.
 
 ## Verification checklist
 
@@ -261,6 +306,8 @@ Before considering a change complete:
 3. Confirm every segment checkbox works on both pages.
 4. Confirm the metric radio switches between all three index metrics on **both**
    pages.
+4b. Confirm the Page 1 two-hour slicer moves through all twelve periods and that
+   the cell count/values change with it, and that Page 2 has no such slicer.
 5. Confirm the Page 2 day-part radio switches between all five day-parts and
    that the cell count/values change with it.
 6. Confirm H3 cells appear in the UAE and tooltips show the correct values.

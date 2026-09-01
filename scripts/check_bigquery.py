@@ -20,10 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from h3_analysis.bigquery_source import (  # noqa: E402
     BigQueryConfigError,
+    billing_project,
     build_day_parts_query,
     build_day_section_index_query,
     build_index_query,
     build_segments_query,
+    build_two_hour_periods_query,
     day_section_table_fqn,
     get_client,
     index_table_fqn,
@@ -50,7 +52,7 @@ def check_page1_metric(client, metric: str) -> bool:
 
     columns = {field.name: field.field_type for field in table.schema}
     print(f"rows    {table.num_rows:,}")
-    required = ("h3_id", "segment", metric)
+    required = ("h3_id", "segment", "hour_bucket", metric)
     missing = [name for name in required if name not in columns]
     if missing:
         print(f"FAIL  Missing expected column(s): {', '.join(missing)}")
@@ -66,17 +68,35 @@ def check_page1_metric(client, metric: str) -> bool:
             print("FAIL  No segments returned.")
             return False
 
-        sql, params = build_index_query(table_fqn, metric, values[:1])
+        periods = run_query(build_two_hour_periods_query(table_fqn), client=client)
+        period_values = sorted(
+            {int(period) for period in periods["hour_bucket"].dropna()}
+        )
+        print(
+            f"periods {len(period_values)}: "
+            + ", ".join(str(period) for period in period_values)
+        )
+        if not period_values:
+            print("FAIL  No two-hour periods returned.")
+            return False
+
+        sql, params = build_index_query(
+            table_fqn, metric, values[:1], period_values[0]
+        )
         frame = run_query(sql, params, client=client)
-        print(f"query   OK - {len(frame):,} cells for segment '{values[0]}'")
+        print(
+            f"query   OK - {len(frame):,} cells for segment '{values[0]}', "
+            f"two-hour period {period_values[0]}"
+        )
         if not frame.empty:
             column = frame[metric]
             print(f"        {metric} min={column.min():.6g} max={column.max():.6g}")
     except Exception as error:
         print(f"FAIL  Query failed: {error}")
         print(
-            "      Needs roles/bigquery.jobUser on the project and "
-            "roles/bigquery.dataViewer on the dataset."
+            f"      Needs roles/bigquery.jobUser on {client.project} "
+            "(the billing project) and roles/bigquery.dataViewer on the "
+            "dataset."
         )
         return False
     return True
@@ -134,8 +154,9 @@ def check_page2_metric(client, metric: str) -> bool:
     except Exception as error:
         print(f"FAIL  Query failed: {error}")
         print(
-            "      Needs roles/bigquery.jobUser on the project and "
-            "roles/bigquery.dataViewer on the dataset."
+            f"      Needs roles/bigquery.jobUser on {client.project} "
+            "(the billing project) and roles/bigquery.dataViewer on the "
+            "dataset."
         )
         return False
     return True
@@ -150,6 +171,16 @@ def main() -> int:
         print(f"FAIL  Could not create a BigQuery client: {error}")
         print("      Run: gcloud auth application-default login")
         return 1
+
+    configured = billing_project()
+    print(f"billing project  {client.project}")
+    if not configured:
+        print(
+            "WARN  Neither BIGQUERY_BILLING_PROJECT nor BIGQUERY_PROJECT_ID is "
+            "set, so jobs are billed to the Application Default Credentials "
+            "project above. That is a common cause of a bigquery.jobs.create "
+            "permission error naming a project you never configured."
+        )
 
     failures = 0
     for metric in PAGE1_METRICS:

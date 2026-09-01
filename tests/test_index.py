@@ -18,10 +18,13 @@ from h3_analysis.data import (
     DataValidationError,
     aggregate_day_section_cells,
     aggregate_index_cells,
+    aggregate_two_hour_index_cells,
     collapse_day_section_duplicates,
     collapse_index_duplicates,
+    collapse_two_hour_duplicates,
     validate_day_section_data,
     validate_index_data,
+    validate_two_hour_index_data,
 )
 
 
@@ -385,14 +388,159 @@ class ThirdMapRemovalTests(unittest.TestCase):
         self.assertNotIn("overall_index", INDEX_METRICS)  # not a Page 2 CSV metric
         self.assertEqual(colors.METRIC_SCALES["overall_index"], "linear")
 
-    def test_no_map_3_or_hourly_data_dir(self):
+    def test_no_map_3_or_hourly_page_or_committed_export(self):
+        """The removed maps are gone from the project.
+
+        The check is that nothing is committed and no page reads them - not
+        that the directories are absent from disk. A developer may keep the old
+        exports locally; .gitignore is what keeps them out of the repository.
+        """
         import os
+        import subprocess
 
         root = os.path.dirname(os.path.dirname(__file__))
-        self.assertFalse(os.path.exists(os.path.join(root, "data", "map_3")))
-        self.assertFalse(os.path.exists(os.path.join(root, "data", "map_1")))
         self.assertFalse(
             os.path.exists(os.path.join(root, "pages", "3_Overall_Analysis.py"))
+        )
+
+        tracked = subprocess.run(
+            ["git", "ls-files", "data/map_1", "data/map_3"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(tracked.stdout.strip(), "", "map_1/map_3 must stay untracked")
+
+        for directory in ("data/map_1", "data/map_3"):
+            for name in ("*.csv",):
+                ignored = subprocess.run(
+                    ["git", "check-ignore", os.path.join(directory, name)],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    ignored.returncode,
+                    0,
+                    f"{directory}/{name} must be gitignored",
+                )
+
+
+class TwoHourIndexTests(unittest.TestCase):
+    """Page 1 local-CSV path: validate, collapse and aggregate by two-hour period."""
+
+    def setUp(self):
+        self.cell_a = h3.latlng_to_cell(24.45, 54.38, 9)
+        self.cell_b = h3.latlng_to_cell(25.20, 55.27, 9)
+        self.frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell_a] * 4 + [self.cell_b] * 2,
+                "segment": [
+                    "Families",
+                    "Families",
+                    "HNWI",
+                    "HNWI",
+                    "Families",
+                    "HNWI",
+                ],
+                "hour_bucket": [8, 10, 8, 10, 8, 8],
+                "overall_index": [10.0, 50.0, 20.0, 60.0, 5.0, 15.0],
+            }
+        )
+
+    def test_requires_the_hour_bucket_column(self):
+        with self.assertRaisesRegex(DataValidationError, "hour_bucket"):
+            validate_two_hour_index_data(
+                self.frame.drop(columns=["hour_bucket"]), "overall_index"
+            )
+
+    def test_drops_rows_with_a_missing_or_fractional_period(self):
+        frame = self.frame.copy()
+        frame.loc[0, "hour_bucket"] = None
+        frame.loc[1, "hour_bucket"] = 9.5
+        result = validate_two_hour_index_data(frame, "overall_index")
+        self.assertEqual(result.removed_rows, 2)
+        self.assertEqual(len(result.data), 4)
+
+    def test_period_survives_validation_as_an_integer(self):
+        result = validate_two_hour_index_data(self.frame, "overall_index")
+        self.assertEqual(result.removed_rows, 0)
+        self.assertEqual(
+            sorted(result.data["hour_bucket"].unique().tolist()), [8, 10]
+        )
+        self.assertTrue(
+            all(isinstance(value, (int, np.integer))
+                for value in result.data["hour_bucket"])
+        )
+
+    def test_filters_to_one_period_then_averages_across_segments(self):
+        collapsed = collapse_two_hour_duplicates(self.frame, "overall_index")
+        result = aggregate_two_hour_index_cells(
+            collapsed, ["Families", "HNWI"], 8, "overall_index"
+        )
+        values = dict(zip(result["h3_id"], result["overall_index"]))
+        # Cell A at 08:00 is mean(10, 20) - the 10:00 rows must not leak in.
+        self.assertAlmostEqual(values[self.cell_a], 15.0)
+        self.assertAlmostEqual(values[self.cell_b], 10.0)
+
+    def test_a_different_period_gives_different_values(self):
+        collapsed = collapse_two_hour_duplicates(self.frame, "overall_index")
+        result = aggregate_two_hour_index_cells(
+            collapsed, ["Families", "HNWI"], 10, "overall_index"
+        )
+        values = dict(zip(result["h3_id"], result["overall_index"]))
+        self.assertAlmostEqual(values[self.cell_a], 55.0)
+        # Cell B has no 10:00 row at all, so it drops off the map.
+        self.assertNotIn(self.cell_b, values)
+
+    def test_each_segment_weighs_the_same_regardless_of_row_count(self):
+        """The per-group step is what stops a row-heavy segment dominating."""
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell_a] * 4,
+                "segment": ["Families", "Families", "Families", "HNWI"],
+                "hour_bucket": [8, 8, 8, 8],
+                "overall_index": [10.0, 10.0, 10.0, 50.0],
+            }
+        )
+        collapsed = collapse_two_hour_duplicates(frame, "overall_index")
+        result = aggregate_two_hour_index_cells(
+            collapsed, ["Families", "HNWI"], 8, "overall_index"
+        )
+        # mean(10, 50) = 30, not the row-weighted mean(10,10,10,50) = 20.
+        self.assertAlmostEqual(result["overall_index"].iloc[0], 30.0)
+
+    def test_collapse_averages_repeated_triples_never_sums(self):
+        frame = pd.DataFrame(
+            {
+                "h3_id": [self.cell_a, self.cell_a],
+                "segment": ["Families", "Families"],
+                "hour_bucket": [8, 8],
+                "volume_index": [0.2, 0.4],
+            }
+        )
+        collapsed = collapse_two_hour_duplicates(frame, "volume_index")
+        self.assertEqual(len(collapsed), 1)
+        self.assertAlmostEqual(collapsed["volume_index"].iloc[0], 0.3)
+
+
+class TwoHourSampleFileTests(unittest.TestCase):
+    """The committed Page 1 fallback must satisfy the contract it feeds."""
+
+    def test_sample_covers_twelve_periods_of_valid_cells(self):
+        frame = pd.read_csv("data/sample_index_two_hours.csv")
+        self.assertEqual(
+            sorted(frame["hour_bucket"].unique().tolist()),
+            [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22],
+        )
+        for metric in ("overall_index", "volume_index", "exclusivity_index"):
+            with self.subTest(metric=metric):
+                result = validate_two_hour_index_data(frame, metric)
+                self.assertEqual(result.removed_rows, 0)
+        resolutions = {h3.get_resolution(cell) for cell in frame["h3_id"].unique()}
+        self.assertEqual(resolutions, {9})
+        self.assertEqual(
+            frame.groupby(["h3_id", "segment", "hour_bucket"]).size().max(), 1
         )
 
 

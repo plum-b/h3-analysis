@@ -7,9 +7,17 @@ pages cache the results of :func:`run_query`.
 Page 1 shows one index metric at a time, each stored in its own BigQuery table
 with the logical schema ``h3_id`` (STRING), ``segment`` (STRING) and one numeric
 metric column named after the metric (``overall_index`` / ``volume_index`` /
-``exclusivity_index``). There is no hour column. Each ``(h3_id, segment)`` pair
-is **repeated** (~8x on the live tables, unevenly), so the metric is averaged in
-two steps - see :func:`build_index_query`.
+``exclusivity_index``), plus an ``hour_bucket`` (INT64) column holding the
+**two-hour period** of the day: 0, 2, 4 ... 22 on the live tables. Each
+``(h3_id, segment, hour_bucket)`` triple appears exactly once (verified against
+BigQuery), which is what makes a ``(h3_id, segment)`` pair look "repeated"
+~8.4x - the twelve two-hour periods are the repetition. Page 1 filters to
+exactly one two-hour period and averages in two steps - see
+:func:`build_index_query`.
+
+Both pages' tables name this column ``hour_bucket``, but the domains differ:
+Page 1 stores INT64 two-hour periods, Page 2 STRING day-part labels. The two
+are never mixed.
 
 Page 2 shows the same three metrics from a parallel set of "*_day_sections"
 tables that add an ``hour_bucket`` (day-part, e.g. Morning/Noon/After
@@ -50,6 +58,13 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,1024}$")
 
 _ENV_PROJECT = "BIGQUERY_PROJECT_ID"
 _ENV_DATASET = "BIGQUERY_DATASET"
+# Project the query JOB is billed to. Defaults to the data project; set this
+# only when jobs must be billed to a different project from the tables.
+_ENV_BILLING_PROJECT = "BIGQUERY_BILLING_PROJECT"
+
+# Both pages' tables call the time column ``hour_bucket``. On Page 1 it holds
+# INT64 two-hour periods (0, 2, ... 22); on Page 2, STRING day-part labels.
+TIME_COLUMN = "hour_bucket"
 
 
 def _metric_env(metric: str, infix: str = "") -> tuple[str, str]:
@@ -176,24 +191,48 @@ def build_segments_query(table_fqn: str) -> str:
     )
 
 
+def coerce_two_hour_period(value) -> int:
+    """Return ``value`` as the INT64 two-hour period, or raise ``ValueError``.
+
+    The selector's value reaches this as a Python ``int``, a NumPy integer from
+    a BigQuery result, or a digit string from a widget. Anything else - a float
+    with a fraction, ``None``, free text - is rejected here rather than being
+    passed to BigQuery, so a bad value can never reach the query at all.
+    """
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"Invalid two-hour period: {value!r}.")
+    try:
+        period = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid two-hour period: {value!r}.") from None
+    if period != float(value):
+        raise ValueError(f"Invalid two-hour period: {value!r}.")
+    return period
+
+
 def build_index_query(
-    table_fqn: str, metric: str, segments: Sequence[str]
+    table_fqn: str,
+    metric: str,
+    segments: Sequence[str],
+    two_hour_period,
 ) -> tuple[str, dict]:
     """Build the aggregated index query and its named parameters.
 
-    The tables repeat each ``(h3_id, segment)`` pair (~8x, unevenly), so this
-    averages in **two steps**: first within each cell/segment pair, then across
-    the selected segments. A single ``AVG ... GROUP BY h3_id`` would instead be a
-    weighted average that lets whichever pair happens to carry more duplicate
-    rows dominate the cell - measured against the live tables that changed 48.6%
-    of cells, by up to 108% relative. This mirrors
+    Page 1 always shows exactly one two-hour period, so the query filters
+    ``hour_bucket = @two_hour_period`` before aggregating, then averages in
+    **two steps**: first within each ``(h3_id, segment, hour_bucket)`` group,
+    then across the selected segments. Keeping the per-group step means the
+    outer average weights every selected segment equally however many rows it
+    contributes - collapsing it into a single ``AVG ... GROUP BY h3_id`` would
+    be a row-weighted average instead. This mirrors
     :func:`h3_analysis.data.collapse_index_duplicates` followed by
     :func:`h3_analysis.data.aggregate_index_cells` on the CSV path.
 
     Aggregation happens in BigQuery; only ``h3_id`` and the averaged metric come
-    back. Segment values travel as ``@segments`` (an array), never interpolated
-    into the SQL text. The metric name is validated against
-    :data:`PAGE1_METRICS` before it is used as a column identifier.
+    back. Segment values travel as ``@segments`` (an array) and the period as
+    ``@two_hour_period`` (an INT64 scalar), never interpolated into the SQL
+    text. The metric name is validated against :data:`PAGE1_METRICS` before it
+    is used as a column identifier.
     """
     if metric not in PAGE1_METRICS:
         raise ValueError(
@@ -202,37 +241,52 @@ def build_index_query(
         )
     if not segments:
         raise ValueError("At least one segment is required.")
+    period = coerce_two_hour_period(two_hour_period)
     segments = [str(segment) for segment in segments]
 
     sql = (
         "WITH per_pair AS (\n"
-        f"  SELECT h3_id, segment, AVG({metric}) AS {metric}\n"
+        f"  SELECT h3_id, segment, {TIME_COLUMN}, AVG({metric}) AS {metric}\n"
         f"  FROM {_backtick(table_fqn)}\n"
         "  WHERE segment IN UNNEST(@segments)\n"
+        f"    AND {TIME_COLUMN} = @two_hour_period\n"
         f"    AND {metric} IS NOT NULL\n"
-        "  GROUP BY h3_id, segment\n"
+        f"  GROUP BY h3_id, segment, {TIME_COLUMN}\n"
         ")\n"
         f"SELECT h3_id, AVG({metric}) AS {metric}\n"
         "FROM per_pair\n"
         "GROUP BY h3_id\n"
         "ORDER BY h3_id"
     )
-    return sql, {"segments": segments}
+    return sql, {"segments": segments, "two_hour_period": period}
+
+def _distinct_time_values_query(table_fqn: str) -> str:
+    """SQL listing the distinct ``hour_bucket`` values a table actually holds.
+
+    Shared by both pages' time selectors. Neither the two-hour periods nor the
+    day-part labels are hard-coded anywhere in this module - whatever the table
+    contains is what the selector offers.
+    """
+    return (
+        f"SELECT DISTINCT {TIME_COLUMN}\n"
+        f"FROM {_backtick(table_fqn)}\n"
+        f"WHERE {TIME_COLUMN} IS NOT NULL\n"
+        f"ORDER BY {TIME_COLUMN}"
+    )
+
+
+def build_two_hour_periods_query(table_fqn: str) -> str:
+    """SQL returning Page 1's distinct two-hour periods (INT64: 0, 2, ... 22)."""
+    return _distinct_time_values_query(table_fqn)
 
 
 def build_day_parts_query(table_fqn: str) -> str:
-    """SQL returning the distinct ``hour_bucket`` (day-part) values.
+    """SQL returning Page 2's distinct ``hour_bucket`` day-part labels.
 
-    Mirrors :func:`build_segments_query`. Values are not hard-coded anywhere in
-    this module - on the live tables they are Morning / Noon / After noon /
-    Night / Other, but this queries whatever the table actually contains.
+    Mirrors :func:`build_segments_query`. On the live tables the values are
+    Morning / Noon / After noon / Night / Other.
     """
-    return (
-        "SELECT DISTINCT hour_bucket\n"
-        f"FROM {_backtick(table_fqn)}\n"
-        "WHERE hour_bucket IS NOT NULL\n"
-        "ORDER BY hour_bucket"
-    )
+    return _distinct_time_values_query(table_fqn)
 
 
 def build_day_section_index_query(
@@ -301,10 +355,31 @@ def _query_parameters(params: Mapping[str, object]):
     return job_params
 
 
+def billing_project(env: Optional[Mapping[str, str]] = None) -> str:
+    """Project that query jobs are billed to, from configuration.
+
+    Prefers ``BIGQUERY_BILLING_PROJECT``, else the data project
+    ``BIGQUERY_PROJECT_ID``. Returns ``""`` when neither is set, which leaves
+    the client on the Application Default Credentials' own project.
+
+    Without this, ``bigquery.Client()`` bills jobs to whatever project the local
+    ``gcloud`` config points at, which fails with "does not have
+    bigquery.jobs.create permission in project ..." naming a project nobody
+    configured - even though the tables themselves are perfectly readable.
+    """
+    env = os.environ if env is None else env
+    return _clean(env, _ENV_BILLING_PROJECT) or _clean(env, _ENV_PROJECT)
+
+
 def get_client(project: Optional[str] = None):
-    """Create a BigQuery client using Application Default Credentials."""
+    """Create a BigQuery client using Application Default Credentials.
+
+    ``project`` is the billing project for the jobs this client runs; it
+    defaults to the configured one (see :func:`billing_project`).
+    """
     from google.cloud import bigquery
 
+    project = project or billing_project()
     return bigquery.Client(project=project) if project else bigquery.Client()
 
 

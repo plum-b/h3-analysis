@@ -9,12 +9,14 @@ United Arab Emirates.
 The application has **exactly two map pages**, each on its own Streamlit page
 because they use different data sources and analysis logic:
 
-- **Page 1 (`app.py`) — index map.** A radio switches the metric between
-  `overall_index`, `volume_index` and `exclusivity_index`; each is a separate
-  BigQuery table. Filter: audience segment only (no time column). Data source:
-  **BigQuery**. A local CSV (upload or the committed synthetic
-  `data/sample_index.csv`) is an explicit development fallback only.
-- **Page 2 (`pages/2_Index_Analysis.py`) — day-part index map.** A radio
+- **Page 1 (`pages/1_Two-Hour_Index_Analysis.py`) — two-hour index map.** A
+  radio switches the metric between `overall_index`, `volume_index` and
+  `exclusivity_index`; each is a separate BigQuery table. Filters: audience
+  segment **and** exactly one two-hour period (`hour_bucket`, INT64:
+  0, 2, 4 … 22). Data source: **BigQuery**. A local CSV (upload or the
+  committed synthetic `data/sample_index_two_hours.csv`) is an explicit
+  development fallback only.
+- **Page 2 (`pages/2_Day-Part_Index_Analysis.py`) — day-part index map.** A radio
   switches the metric between the same three names; each is a separate
   `*_day_sections` BigQuery table carrying an extra `hour_bucket` (day-part)
   column. Filters: audience segment **and** day-part. Data source: **BigQuery**.
@@ -36,9 +38,11 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 
 1. The user picks a metric (Overall / Volume / Exclusivity).
 2. The app queries that metric's BigQuery table (or, in the local fallback,
-   loads `data/sample_index.csv` / an upload).
-3. The user includes or excludes audience segments using checkboxes.
-4. The metric is averaged per `h3_id` across the selected segments (in BigQuery).
+   loads the committed synthetic CSV / an upload).
+3. The user includes or excludes audience segments using checkboxes, and on
+   Page 1 picks exactly one two-hour period (Page 2: one day-part).
+4. The metric is averaged per `h3_id` across the selected segments (in BigQuery),
+   after the time filter has been applied.
 5. The map displays one colored H3 polygon per aggregated cell, with a
    per-metric sequential legend.
 6. The user can switch between dark and alternate basemap styles.
@@ -77,12 +81,13 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 
 ### 3b. CSV contract (development fallbacks)
 
-Page 1 fallback (`data/sample_index.csv`, or an upload):
+Page 1 fallback (`data/sample_index_two_hours.csv`, or an upload):
 
 | Field | Required format | Validation |
 | --- | --- | --- |
 | `h3_id` | Text | Non-empty valid H3 index |
 | `segment` | Text | Non-empty category |
+| `hour_bucket` | Number | Integral two-hour period; fractional rows dropped |
 | `<metric>` | Number | Finite and ≥ 0; column named after the metric |
 
 Page 2 fallback (`data/sample_index_day_sections.csv`, or an upload) adds:
@@ -91,12 +96,13 @@ Page 2 fallback (`data/sample_index_day_sections.csv`, or an upload) adds:
 | --- | --- | --- |
 | `hour_bucket` | Text | Non-empty day-part label |
 
-`data/sample_index.csv` carries all three metric columns (45 cells,
-resolution 8). `data/sample_index_day_sections.csv` carries all three plus
-`hour_bucket` (250 cells, **resolution 9**, matching the live Page 2 tables).
-Because the two files differ in resolution and columns, they are **not**
-interchangeable — Page 2 must never fall back to `data/sample_index.csv`
-(see §4b-i).
+`data/sample_index_two_hours.csv` carries all three metric columns plus the
+twelve INT64 `hour_bucket` periods (250 cells, **resolution 9**).
+`data/sample_index_day_sections.csv` carries all three plus its STRING
+day-part `hour_bucket` (250 cells, **resolution 9**, matching the live Page 2
+tables). The legacy `data/sample_index.csv` is a 45-cell **resolution-8** file
+with no `hour_bucket` at all: it satisfies neither page now, and neither page
+may fall back to it (see §4b-i).
 
 Repeated key rows are averaged (never summed); the datasets are never joined.
 Unknown extra columns are ignored. Invalid values are reported with the affected
@@ -108,8 +114,10 @@ row count; invalid cells are excluded, never placed at an unrelated location.
 
 - Default data source is BigQuery (see §3a).
 - The sidebar can switch to the local fallback (or `H3_DATA_SOURCE=local`).
-- Local fallback order: uploaded CSV, then the committed synthetic
-  `data/sample_index.csv`; otherwise show instructions and stop cleanly.
+- Local fallback order: uploaded CSV, then the committed synthetic file for
+  that page (`data/sample_index_two_hours.csv` on Page 1,
+  `data/sample_index_day_sections.csv` on Page 2); otherwise show instructions
+  and stop cleanly.
 - Production data must remain outside version control.
 
 ### Filters
@@ -225,9 +233,10 @@ Page 1); there is no join in this path and none should be added.
 
 ```text
 h3-analysis/
-|-- app.py                    # Page 1: index map (BigQuery, 3 metric tables)
+|-- app.py                    # Entry point: st.set_page_config + st.navigation only
 |-- pages/
-|   `-- 2_Index_Analysis.py   # Page 2: day-part index map (BigQuery, 3 *_day_sections tables)
+|   |-- 1_Two-Hour_Index_Analysis.py   # Page 1: two-hour index map (3 metric tables)
+|   `-- 2_Day-Part_Index_Analysis.py   # Page 2: day-part index map (3 *_day_sections tables)
 |-- h3_analysis/
 |   |-- bigquery_source.py    # Streamlit-free BigQuery config + query builders (both pages)
 |   |-- data.py               # Validation and aggregation helpers (index + day-section)
@@ -249,7 +258,8 @@ h3-analysis/
 |-- .streamlit/config.toml
 |-- .claude/launch.json
 `-- data/
-    |-- sample_index.csv       # Committed synthetic Page 1 fallback (all 3 metrics, res 8)
+    |-- sample_index_two_hours.csv     # Committed synthetic Page 1 fallback (+ INT64 hour_bucket, res 9)
+    |-- sample_index.csv       # Legacy 45-cell res-8 sample; no longer used by either page
     |-- sample_index_day_sections.csv  # Committed synthetic Page 2 fallback (+ hour_bucket, res 9)
     `-- map_2/*.csv            # Legacy local index exports; ignored by Git, no longer read
 ```

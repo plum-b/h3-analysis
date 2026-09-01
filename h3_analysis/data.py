@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 
 # Page 1 (BigQuery) shows one of these index metrics, each from its own table.
-# Schema per table: h3_id, segment, <the metric column>. No hour column.
+# Schema per table: h3_id, segment, <the metric column>, hour_bucket - where
+# hour_bucket is an INT64 *two-hour period* of the day (0, 2, ... 22 on the
+# live tables). Verified against BigQuery: each (h3_id, segment, hour_bucket)
+# triple appears exactly once, so the ~8.4 rows per (h3_id, segment) pair are
+# the twelve two-hour periods, not true duplicates.
 PAGE1_METRICS = ("overall_index", "volume_index", "exclusivity_index")
 
 # Page 2 (BigQuery, day-part) shows the same three metrics, each from its own
@@ -28,6 +32,10 @@ INDEX_BASE_COLUMNS = ("h3_id", "segment")
 
 # Page 2's day-section schema: h3_id, segment, hour_bucket, <the metric column>.
 DAY_SECTION_BASE_COLUMNS = ("h3_id", "segment", "hour_bucket")
+
+# Page 1's schema: the same three keys, but hour_bucket is the INT64 two-hour
+# period rather than Page 2's day-part label.
+TWO_HOUR_BASE_COLUMNS = ("h3_id", "segment", "hour_bucket")
 
 # Every metric that shares the h3_id/segment/<metric> index schema.
 ALL_INDEX_METRICS = tuple(dict.fromkeys(PAGE1_METRICS + INDEX_METRICS))
@@ -217,3 +225,84 @@ def aggregate_day_section_cells(
     ]
     return selected.groupby("h3_id", as_index=False, sort=True)[metric].mean()
 
+
+
+def validate_two_hour_index_data(
+    frame: pd.DataFrame, metric: str
+) -> ValidationResult:
+    """Validate a Page 1 export for one metric, including its two-hour period.
+
+    Same shape as :func:`validate_index_data` plus a required, integral
+    ``hour_bucket`` column - the two-hour period of the day. Rows whose period
+    is missing or fractional are dropped rather than silently coerced, because a
+    half-period would land in no selectable bucket.
+    """
+    if metric not in PAGE1_METRICS:
+        raise DataValidationError(
+            f"Unknown metric '{metric}'. Expected one of: "
+            + ", ".join(PAGE1_METRICS)
+        )
+
+    required = (*TWO_HOUR_BASE_COLUMNS, metric)
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise DataValidationError("Missing required columns: " + ", ".join(missing))
+
+    data = frame.loc[:, list(required)].copy()
+    data["h3_id"] = data["h3_id"].astype("string").str.strip()
+    data["segment"] = data["segment"].astype("string").str.strip()
+    periods = pd.to_numeric(data["hour_bucket"], errors="coerce")
+    data[metric] = pd.to_numeric(data[metric], errors="coerce")
+
+    valid_rows = (
+        _valid_h3_mask(data["h3_id"])
+        & data["segment"].notna()
+        & data["segment"].ne("")
+        & np.isfinite(periods)
+        & periods.eq(periods.round())
+        & np.isfinite(data[metric])
+        & data[metric].ge(0)
+    )
+
+    removed_rows = int((~valid_rows).sum())
+    data = data.loc[valid_rows].copy()
+    if data.empty:
+        raise DataValidationError(
+            f"The CSV contains no valid '{metric}' rows."
+        )
+    data["hour_bucket"] = periods.loc[valid_rows].astype(int)
+
+    return ValidationResult(data=data, removed_rows=removed_rows)
+
+
+def collapse_two_hour_duplicates(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Average any repeated rows for the same cell, segment and two-hour period.
+
+    The live tables hold exactly one row per (h3_id, segment, hour_bucket)
+    triple, so this is normally a no-op; it guards a local CSV that repeats a
+    row. Averaging - never summing - keeps a normalized index in range.
+    """
+    return (
+        frame.groupby(list(TWO_HOUR_BASE_COLUMNS), as_index=False, sort=True)[metric]
+        .mean()
+    )
+
+
+def aggregate_two_hour_index_cells(
+    frame: pd.DataFrame,
+    selected_segments: list,
+    selected_period: int,
+    metric: str,
+) -> pd.DataFrame:
+    """Filter to one two-hour period, then average across selected segments.
+
+    Mirrors :func:`h3_analysis.bigquery_source.build_index_query`: the frame
+    reaching here has already been collapsed per
+    (h3_id, segment, hour_bucket), so this is the second averaging step and it
+    weights each selected segment equally.
+    """
+    selected = frame[
+        frame["segment"].isin(selected_segments)
+        & frame["hour_bucket"].eq(selected_period)
+    ]
+    return selected.groupby("h3_id", as_index=False, sort=True)[metric].mean()

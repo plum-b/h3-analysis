@@ -8,15 +8,19 @@ most often need.
 
 A Streamlit app with **exactly two H3 index-analysis map pages**:
 
-- **Page 1 — `app.py`** — index map. Filter: audience `segment` only (no time
-  column). A radio switches the metric between `overall_index`, `volume_index`
-  and `exclusivity_index`; **each metric is its own BigQuery table**
-  (`h3_id` / `segment` / `<metric>`; each pair is **repeated ~8x, unevenly**).
-  The map averages **in two steps** — within each `(h3_id, segment)` pair, then
-  across the selected segments. A single `AVG ... GROUP BY h3_id` is wrong: it
-  weights by duplicate count and shifted 48.6% of cells on the live data. **Data source is BigQuery**;
-  `data/sample_index.csv` (or an upload) is a development fallback only.
-- **Page 2 — `pages/2_Index_Analysis.py`** — day-part index map. Filters:
+- **Page 1 — `pages/1_Two-Hour_Index_Analysis.py`** — two-hour index map.
+  Filters: audience `segment` **and** exactly one two-hour period. A radio
+  switches the metric between `overall_index`, `volume_index` and
+  `exclusivity_index`; **each metric is its own BigQuery table**
+  (`h3_id` / `segment` / `<metric>` / `hour_bucket`, where `hour_bucket` is the
+  **INT64** two-hour period 0, 2, 4 … 22). Each `(h3_id, segment, hour_bucket)`
+  triple appears exactly once — the ~8.4 rows per `(h3_id, segment)` pair are
+  the twelve periods. The map averages **in two steps** — within each
+  `(h3_id, segment, hour_bucket)` group, then across the selected segments — so
+  a segment contributing more rows cannot dominate a cell. **Data source is
+  BigQuery**; `data/sample_index_two_hours.csv` (or an upload) is a development
+  fallback only.
+- **Page 2 — `pages/2_Day-Part_Index_Analysis.py`** — day-part index map. Filters:
   audience `segment` **and** `hour_bucket` (day-part). Same three metrics, each
   its own **`*_day_sections` BigQuery table**
   (`h3_id` / `segment` / `<metric>` / `hour_bucket`). Unlike Page 1, each
@@ -43,7 +47,9 @@ aggregating.
   per-metric `BIGQUERY_<METRIC>[_DAY_SECTIONS]_TABLE_FQN`. Never hard-code a
   project, dataset, table, credential, or SQL value. Values live in
   `.env.example` → `cp .env.example .env` (project `maddictdata`, dataset
-  `OOH_Analysis`). Verify with `python3 scripts/check_bigquery.py` (checks both
+  `OOH_Analysis`), with jobs billed to `BIGQUERY_BILLING_PROJECT` or
+  `BIGQUERY_PROJECT_ID` — never to the ambient `gcloud` default.
+  Verify with `python3 scripts/check_bigquery.py` (checks both
   pages).
 - Filters travel as `@segments` (and `@hour_bucket` on Page 2); never
   interpolate user input into SQL. Only the validated FQN and the allow-listed

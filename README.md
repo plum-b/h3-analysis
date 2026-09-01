@@ -6,8 +6,8 @@ Streamlit page because they use different data sources and analysis logic:
 
 | Page | File | Data source | Filter | Metric |
 | --- | --- | --- | --- | --- |
-| 1. Index analysis | `app.py` | **BigQuery** (3 tables) — local CSV = dev fallback | audience segment | `overall_index` / `volume_index` / `exclusivity_index` (switchable) |
-| 2. Index analysis (day-part) | `pages/2_Index_Analysis.py` | **BigQuery** (3 `*_day_sections` tables) — local CSV = dev fallback | audience segment **+ day-part** | `overall_index` / `volume_index` / `exclusivity_index` (switchable) |
+| 1. Two-Hour Index Analysis | `pages/1_Two-Hour_Index_Analysis.py` | **BigQuery** (3 tables) — local CSV = dev fallback | audience segment + one two-hour period | `overall_index` / `volume_index` / `exclusivity_index` (switchable) |
+| 2. Day-Part Index Analysis | `pages/2_Day-Part_Index_Analysis.py` | **BigQuery** (3 `*_day_sections` tables) — local CSV = dev fallback | audience segment **+ day-part** | `overall_index` / `volume_index` / `exclusivity_index` (switchable) |
 
 Only one map is shown per page. Each page averages the selected metric across the
 chosen segments per `h3_id` (index values are **averaged, never summed**).
@@ -16,10 +16,13 @@ chosen segments per `h3_id` (index values are **averaged, never summed**).
 
 Both pages are implemented on BigQuery. One table per metric, per page.
 
-- **Page 1** — schema `h3_id` STRING, `segment` STRING, `<metric>` FLOAT, **no
-  time column**. Each `(h3_id, segment)` pair is repeated (~8x, unevenly), so
-  values are averaged within each pair *before* being averaged across segments
-  (a two-step aggregation).
+- **Page 1** — schema `h3_id` STRING, `segment` STRING, `<metric>` FLOAT,
+  `hour_bucket` **INT64** — the two-hour period of the day (0, 2, 4 … 22). Each
+  `(h3_id, segment, hour_bucket)` triple appears **exactly once**; the ~8.4 rows
+  per `(h3_id, segment)` pair are simply the twelve periods. The page slices to
+  one period, then averages within each `(h3_id, segment, hour_bucket)` group
+  *before* averaging across segments (a two-step aggregation), so a segment
+  contributing more rows cannot dominate a cell.
 - **Page 2** — schema `h3_id` STRING, `segment` STRING, `<metric>` FLOAT,
   `hour_bucket` STRING (the day-part). Each `(h3_id, segment, hour_bucket)`
   triple appears **exactly once**, so after filtering to one day-part the metric
@@ -80,9 +83,11 @@ H3_DATA_SOURCE=local python3 -m streamlit run app.py
 ```
 
 The local fallback uses an uploaded CSV, otherwise the committed synthetic
-`data/sample_index.csv` (which carries all three metric columns). The same
-sidebar switch and `H3_DATA_SOURCE=local` also apply to Page 2, whose fallback
-is `data/sample_index_day_sections.csv` (all three metrics plus `hour_bucket`).
+`data/sample_index_two_hours.csv` (all three metric columns plus the twelve
+two-hour `hour_bucket` values). The same sidebar switch and
+`H3_DATA_SOURCE=local` also apply to Page 2, whose fallback is
+`data/sample_index_day_sections.csv` (all three metrics plus its day-part
+`hour_bucket`).
 
 ### Running Page 1 against BigQuery locally
 
@@ -105,20 +110,42 @@ python3 scripts/check_bigquery.py
 ```
 
 It checks **both pages**: it resolves each metric's table, confirms the expected
-columns exist (`h3_id` / `segment` / `<metric>`, plus `hour_bucket` on Page 2),
-lists the segments and day-parts, and runs the real aggregation query for one
-segment. Then start the app:
+columns exist (`h3_id` / `segment` / `<metric>` / `hour_bucket`), prints the
+billing project, lists the segments plus each page's time values (Page 1 two-hour
+periods, Page 2 day-parts), and runs the real aggregation query for one segment.
+Then start the app:
 
 ```bash
 python3 -m streamlit run app.py
 ```
 
-Each Page 1 table must expose `h3_id` (STRING), `segment` (STRING) and one
-numeric column named exactly after its metric; each Page 2 `*_day_sections`
-table must expose those plus `hour_bucket` (STRING). Segment filters are always
-sent as an array query parameter and the day-part as a scalar parameter; no user
-value is interpolated into SQL, and only the validated table FQN reaches the
-`FROM` clause.
+Each Page 1 table must expose `h3_id` (STRING), `segment` (STRING), one numeric
+column named exactly after its metric, and `hour_bucket` (INT64, the two-hour
+period); each Page 2 `*_day_sections` table must expose the same columns with
+`hour_bucket` as STRING day-part labels. Segment filters are always sent as an
+array query parameter, and the time filter as a scalar parameter
+(`@two_hour_period` on Page 1, `@hour_bucket` on Page 2); no user value is
+interpolated into SQL, and only the validated table FQN reaches the `FROM`
+clause.
+
+Query **jobs** are billed to `BIGQUERY_BILLING_PROJECT`, or `BIGQUERY_PROJECT_ID`
+when that is unset. Without this the client falls back to whatever project the
+local `gcloud` config points at, which fails with a `bigquery.jobs.create`
+permission error naming a project that appears nowhere in this repository even
+though the tables are readable.
+
+## Basemaps
+
+The basemap radio offers **Streets + terrain** (the default), **Street Map** and
+**Dark**. The detailed style is OpenFreeMap Liberty: building footprints, 28 road
+classes, POI and place labels, and a Natural Earth shaded-relief source, so
+streets and buildings read through the translucent H3 layer as you zoom in. It is
+token-free.
+
+Set `H3_BASEMAP_STYLE_URL` to any MapLibre style.json URL to use a different
+provider — that variable is also where a provider key belongs, never in source.
+Anything malformed or unrecognised falls back to CARTO Voyager, so a basemap can
+never be the reason the map fails to draw.
 
 ## Configuration (environment variables)
 
@@ -128,6 +155,8 @@ Current production values (also in `.env.example`):
 | --- | --- | --- |
 | `BIGQUERY_PROJECT_ID` | GCP project holding the tables | `maddictdata` |
 | `BIGQUERY_DATASET` | dataset holding all six tables | `OOH_Analysis` |
+| `BIGQUERY_BILLING_PROJECT` | Project the query **jobs** are billed to (defaults to `BIGQUERY_PROJECT_ID`) | `maddictdata` |
+| `H3_BASEMAP_STYLE_URL` | MapLibre style.json URL for the detailed basemap (optional) | OpenFreeMap Liberty |
 | `BIGQUERY_OVERALL_INDEX_TABLE` | Page 1 table for `overall_index` | `h3_analysis_indexed_filtered` |
 | `BIGQUERY_VOLUME_INDEX_TABLE` | Page 1 table for `volume_index` | `h3_analysis_volume_index_filtered` |
 | `BIGQUERY_EXCLUSIVITY_INDEX_TABLE` | Page 1 table for `exclusivity_index` | `h3_analysis_exclusivity_index_filtered` |
