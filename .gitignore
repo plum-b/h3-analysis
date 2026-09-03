@@ -1,4 +1,7 @@
 .venv/
+# Backup/parallel environments too: a virtualenv can cache tokens, and it is
+# never something this repository should carry.
+.venv*/
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
@@ -48,9 +51,16 @@ id_ed25519.*
 # already wrong, so make it unstageable rather than merely discouraged.
 credentials*.json
 *-credentials.json
+*.credentials.json
 service-account*.json
+*service_account*.json
 application_default_credentials.json
 gha-creds-*.json
+# OAuth client downloads keep this exact name straight out of the Cloud console.
+client_secret*.json
+# Any downloaded key, whatever it was renamed to.
+*key.json
+sa-*.json
 
 # Local secret directories.
 .secrets/
