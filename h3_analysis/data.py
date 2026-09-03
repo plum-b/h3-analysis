@@ -12,26 +12,34 @@ import pandas as pd
 # live tables). Verified against BigQuery: each (h3_id, segment, hour_bucket)
 # triple appears exactly once, so the ~8.4 rows per (h3_id, segment) pair are
 # the twelve two-hour periods, not true duplicates.
-PAGE1_METRICS = ("overall_index", "volume_index", "exclusivity_index")
+#
+# The exclusivity index was removed from the application: it is offered by no
+# selector, its tables are not configured, and nothing queries them.
+PAGE1_METRICS = ("overall_index", "volume_index")
 
-# Page 2 (BigQuery, day-part) shows the same three metrics, each from its own
-# "*_day_sections" table with the added ``hour_bucket`` (day-part) column.
-# Confirmed against the live tables: h3_id/<metric>/segment/hour_bucket, all
-# resolution-9 H3 cells, no NULL or negative metric values, and - unlike
-# Page 1 - each (h3_id, segment, hour_bucket) triple is NOT repeated (verified
-# max repeat count = 1 on all three live tables), so no per-pair averaging
-# step is needed before averaging across segments.
+# Page 2 (BigQuery, day-part) shows the same two metrics, each from its own
+# "*_day_sections" table with the added ``hour_bucket`` (day-part) and
+# ``Week_part`` (Weekday / Weekend) columns. Confirmed against the live tables:
+# h3_id/<metric>/segment/hour_bucket/Week_part, all resolution-9 H3 cells, no
+# NULL or negative metric values, and - unlike Page 1 - each
+# (h3_id, segment, hour_bucket, Week_part) row is NOT repeated (verified max
+# repeat count = 1 on both live tables), so no per-pair averaging step is
+# needed before averaging across segments.
 PAGE2_METRICS = PAGE1_METRICS
 
 # Legacy Page 2 local-CSV index exports (superseded by the day-section
 # BigQuery tables above). Kept only because the generic h3_id/segment/<metric>
 # validation and aggregation helpers below are still useful and tested; Page 2
-# itself no longer reads this two-metric, no-hour-column shape.
-INDEX_METRICS = ("exclusivity_index", "volume_index")
+# itself no longer reads this no-hour-column shape. Exclusivity was the other
+# metric in that export and is gone with the rest of it.
+INDEX_METRICS = ("volume_index",)
 INDEX_BASE_COLUMNS = ("h3_id", "segment")
 
-# Page 2's day-section schema: h3_id, segment, hour_bucket, <the metric column>.
-DAY_SECTION_BASE_COLUMNS = ("h3_id", "segment", "hour_bucket")
+# Page 2's day-section schema: h3_id, segment, hour_bucket, Week_part and the
+# metric column. ``Week_part`` splits every day-part into Weekday and Weekend,
+# so it is part of the key, not an attribute of it.
+WEEK_PART_COLUMN = "Week_part"
+DAY_SECTION_BASE_COLUMNS = ("h3_id", "segment", "hour_bucket", WEEK_PART_COLUMN)
 
 # Page 1's schema: the same three keys, but hour_bucket is the INT64 two-hour
 # period rather than Page 2's day-part label.
@@ -159,7 +167,9 @@ def validate_day_section_data(frame: pd.DataFrame, metric: str) -> ValidationRes
 
     Same shape as :func:`validate_index_data` plus a required ``hour_bucket``
     (day-part) column - e.g. ``Morning`` / ``Noon`` / ``After noon`` / ``Night``
-    / ``Other`` on the live tables, though the value set is not hard-coded here.
+    / ``Other`` on the live tables - and a required ``Week_part`` column
+    (``Weekday`` / ``Weekend``). Neither value set is hard-coded here; the
+    selectors offer whatever the data holds.
     """
     if metric not in PAGE2_METRICS:
         raise DataValidationError(
@@ -176,6 +186,7 @@ def validate_day_section_data(frame: pd.DataFrame, metric: str) -> ValidationRes
     data["h3_id"] = data["h3_id"].astype("string").str.strip()
     data["segment"] = data["segment"].astype("string").str.strip()
     data["hour_bucket"] = data["hour_bucket"].astype("string").str.strip()
+    data[WEEK_PART_COLUMN] = data[WEEK_PART_COLUMN].astype("string").str.strip()
     data[metric] = pd.to_numeric(data[metric], errors="coerce")
 
     valid_rows = (
@@ -184,6 +195,8 @@ def validate_day_section_data(frame: pd.DataFrame, metric: str) -> ValidationRes
         & data["segment"].ne("")
         & data["hour_bucket"].notna()
         & data["hour_bucket"].ne("")
+        & data[WEEK_PART_COLUMN].notna()
+        & data[WEEK_PART_COLUMN].ne("")
         & np.isfinite(data[metric])
         & data[metric].ge(0)
     )
@@ -199,12 +212,12 @@ def validate_day_section_data(frame: pd.DataFrame, metric: str) -> ValidationRes
 
 
 def collapse_day_section_duplicates(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
-    """Average any repeated rows for the same cell, segment and day-part.
+    """Average repeated rows for the same cell, segment, day-part and week-part.
 
     The live day-section tables carry no duplicates for a given
-    ``(h3_id, segment, hour_bucket)`` triple (verified against BigQuery: max
-    repeat count is 1), unlike Page 1's tables. This still guards a local CSV
-    that happens to repeat a row - averaging one row is a no-op.
+    ``(h3_id, segment, hour_bucket, Week_part)`` row (verified against
+    BigQuery: max repeat count is 1), unlike Page 1's tables. This still guards
+    a local CSV that happens to repeat a row - averaging one row is a no-op.
     """
     return (
         frame.groupby(list(DAY_SECTION_BASE_COLUMNS), as_index=False, sort=True)[metric]
@@ -216,12 +229,19 @@ def aggregate_day_section_cells(
     frame: pd.DataFrame,
     selected_segments: list[str],
     selected_hour_bucket: str,
+    selected_week_part: str,
     metric: str,
 ) -> pd.DataFrame:
-    """Filter to one day-part, then average the metric across selected segments."""
+    """Filter to one day-part *and* week-part, then average across segments.
+
+    Mirrors :func:`h3_analysis.bigquery_source.build_day_section_index_query`:
+    both filters apply together, so Weekday Morning and Weekend Morning are
+    different views of the map rather than one blended average.
+    """
     selected = frame[
         frame["segment"].isin(selected_segments)
         & frame["hour_bucket"].eq(selected_hour_bucket)
+        & frame[WEEK_PART_COLUMN].eq(selected_week_part)
     ]
     return selected.groupby("h3_id", as_index=False, sort=True)[metric].mean()
 

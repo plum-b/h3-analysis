@@ -10,14 +10,14 @@ The application has **exactly two map pages**, each on its own Streamlit page
 because they use different data sources and analysis logic:
 
 - **Page 1 (`pages/1_Two-Hour_Index_Analysis.py`) — two-hour index map.** A
-  radio switches the metric between `overall_index`, `volume_index` and
-  `exclusivity_index`; each is a separate BigQuery table. Filters: audience
+  radio switches the metric between `overall_index` and `volume_index`; each is
+  a separate BigQuery table. Filters: exactly one audience
   segment **and** exactly one two-hour period (`hour_bucket`, INT64:
   0, 2, 4 … 22). Data source: **BigQuery**. A local CSV (upload or the
   committed synthetic `data/sample_index_two_hours.csv`) is an explicit
   development fallback only.
 - **Page 2 (`pages/2_Day-Part_Index_Analysis.py`) — day-part index map.** A radio
-  switches the metric between the same three names; each is a separate
+  switches the metric between the same two names; each is a separate
   `*_day_sections` BigQuery table carrying an extra `hour_bucket` (day-part)
   column. Filters: audience segment **and** day-part. Data source: **BigQuery**.
   A local CSV (upload or the committed synthetic
@@ -36,13 +36,13 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 
 ## 2. Page 1 user workflow
 
-1. The user picks a metric (Overall / Volume / Exclusivity).
+1. The user picks a metric (Overall / Volume).
 2. The app queries that metric's BigQuery table (or, in the local fallback,
    loads the committed synthetic CSV / an upload).
-3. The user includes or excludes audience segments using checkboxes, and on
-   Page 1 picks exactly one two-hour period (Page 2: one day-part).
-4. The metric is averaged per `h3_id` across the selected segments (in BigQuery),
-   after the time filter has been applied.
+3. The user picks exactly one audience segment from a sidebar radio, and on
+   Page 1 exactly one two-hour period (Page 2: one day-part and one week-part).
+4. The metric is averaged per `h3_id` for the selected segment (in BigQuery),
+   after the time filters have been applied.
 5. The map displays one colored H3 polygon per aggregated cell, with a
    per-metric sequential legend.
 6. The user can switch between dark and alternate basemap styles.
@@ -54,18 +54,19 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 
 - One fully qualified table per metric, from configuration:
   `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` +
-  `BIGQUERY_{OVERALL,VOLUME,EXCLUSIVITY}_INDEX_TABLE`, or a per-metric
+  `BIGQUERY_{OVERALL,VOLUME}_INDEX_TABLE`, or a per-metric
   `BIGQUERY_<METRIC>_TABLE_FQN` override. No project, dataset, table, credential,
   or SQL value is hard-coded. Confirmed values: project `your-gcp-project`, dataset
   `your_dataset`, tables `overall_index_table` (overall),
-  `volume_index_table`, `exclusivity_index_table`.
+  `volume_index_table`.
 - Resolution order is real environment variables, then the Git-ignored `.env`
   (template: `.env.example`). `scripts/check_bigquery.py` validates the wiring.
 - Each table's schema: `h3_id` STRING, `segment` STRING, and one numeric column
-  named exactly after the metric (`overall_index` / `volume_index` /
-  `exclusivity_index`), FLOAT. No time column. Each `(h3_id, segment)` pair is
+  named exactly after the metric (`overall_index` / `volume_index`), FLOAT.
+  No time column. Each `(h3_id, segment)` pair is
   **repeated** — ~8.4 rows per pair on the live tables, unevenly distributed.
-- The segment filter is bound as `@segments` (ARRAY<STRING>). User values are
+- The segment filter is bound as `@segments` (ARRAY<STRING>, carrying the one
+  selected segment). User values are
   never interpolated into SQL. Only the validated table FQN and the allow-listed
   metric name reach the SQL text.
 - Aggregation runs in BigQuery in **two steps**: `AVG` grouped by
@@ -122,9 +123,10 @@ row count; invalid cells are excluded, never placed at an unrelated location.
 
 ### Filters
 
-- A metric radio (Overall / Volume / Exclusivity) drives which table is queried.
-- Display one checkbox for each distinct `segment` value; select all by default;
-  require at least one selected segment.
+- A metric radio (Overall / Volume) drives which table is queried.
+- Display the distinct `segment` values as a **radio** in the sidebar: exactly
+  one segment is selected at a time, the first by default. There is no
+  "select all" and no multi-segment selection.
 - There is no time filter on Page 1.
 
 ### Aggregation
@@ -155,43 +157,50 @@ row count; invalid cells are excluded, never placed at an unrelated location.
 ## 4b. Page 2 — day-part index analysis map
 
 A second **page** analyses the day-section BigQuery dataset. It reuses the
-shared H3 rendering and sidebar segment checkboxes (`h3_analysis/mapping.py`),
-and adds a day-part control.
+shared H3 rendering and the sidebar segment radio (`h3_analysis/mapping.py`),
+and adds day-part and week-part controls.
 
 ### Source and schema (verified against the live tables)
 
 - One fully qualified table per metric, from configuration:
   `BIGQUERY_PROJECT_ID` + `BIGQUERY_DATASET` +
-  `BIGQUERY_{OVERALL,VOLUME,EXCLUSIVITY}_INDEX_DAY_SECTIONS_TABLE`, or a
+  `BIGQUERY_{OVERALL,VOLUME}_INDEX_DAY_SECTIONS_TABLE`, or a
   per-metric `BIGQUERY_<METRIC>_DAY_SECTIONS_TABLE_FQN` override. Confirmed
   values: project `your-gcp-project`, dataset `your_dataset`, tables
   `overall_index_day_sections_table` (overall),
-  `volume_index_day_sections_table`,
-  `exclusivity_index_day_sections_table`.
+  `volume_index_day_sections_table`.
 - Schema: `h3_id` STRING, `segment` STRING, `<metric>` FLOAT, `hour_bucket`
-  STRING. The `hour_bucket` column holds **day-part labels, not hours**:
-  `Morning`, `Noon`, `After noon`, `Night`, `Other`.
-- Measured: ~601k rows and ~60.2k distinct cells per table; 3 segments × 5
-  day-parts; all `h3_id` values valid **resolution-9** cells inside the UAE
-  (lat ≈ 22.67–26.04, lon ≈ 51.62–56.37); no NULL or negative metric values.
-- **Each `(h3_id, segment, hour_bucket)` triple appears exactly once** (max
-  repeat count = 1), unlike Page 1's ~8x repeated pairs.
+  STRING, `Week_part` STRING. The `hour_bucket` column holds **day-part labels,
+  not hours**: `Morning`, `Noon`, `After noon`, `Night`, `Other`. `Week_part`
+  (capital `W`) holds `Weekday` / `Weekend`.
+- Measured: ~1.06M rows and ~60.2k distinct cells per table; 3 segments × 5
+  day-parts × 2 week-parts; all `h3_id` values valid **resolution-9** cells
+  inside the UAE (lat ≈ 22.67–26.04, lon ≈ 51.62–56.37); no NULL or negative
+  metric values.
+- **Each `(h3_id, segment, hour_bucket, Week_part)` row appears exactly once**
+  (max repeat count = 1), unlike Page 1's ~8x repeated pairs.
 
 ### Filters and aggregation
 
-- The metric control switches between all three index metrics; the selected
-  metric drives the cell color, tooltip value, legend, and title.
-- Segment checkboxes behave as on Page 1; at least one is required.
-- A day-part radio selects exactly one `hour_bucket`. The page must always
-  filter to a single day-part before aggregating — averaging across day-parts
-  would silently reproduce Page 1's numbers instead of a time-of-day view.
+- The metric control switches between both index metrics; the selected metric
+  drives the cell color, tooltip value, legend, and title.
+- The segment radio behaves as on Page 1: exactly one segment.
+- A day-part radio selects exactly one `hour_bucket`, and a week-part radio
+  exactly one `Week_part` (Weekday / Weekend). Both filters always apply
+  together. Averaging across day-parts would silently reproduce Page 1's
+  numbers instead of a time-of-day view; averaging across week-parts would
+  blend weekday and weekend behaviour into one map.
+- The week-part options come from the table (`SELECT DISTINCT Week_part`), not
+  from a hard-coded list. Page 1's tables have no `Week_part` column, so the
+  selector belongs to Page 2 only.
 - Aggregation runs in BigQuery in **one step**:
-  `AVG(<metric>) ... WHERE segment IN UNNEST(@segments) AND hour_bucket = @hour_bucket GROUP BY h3_id`.
-  A Page-1-style two-step per-pair CTE is wrong here: with no duplicate triples
-  it averages single-row groups, adding cost for an identical result.
-- Segment values travel as `@segments` (ARRAY<STRING>) and the day-part as
-  `@hour_bucket` (scalar). No user value is interpolated into SQL. Results are
-  cached with `st.cache_data` keyed by table FQN, metric, segments and day-part.
+  `AVG(<metric>) ... WHERE segment IN UNNEST(@segments) AND hour_bucket = @hour_bucket AND Week_part = @week_part GROUP BY h3_id`.
+  A Page-1-style two-step per-pair CTE is wrong here: with no duplicate rows it
+  averages single-row groups, adding cost for an identical result.
+- The segment travels as `@segments` (ARRAY<STRING>), the day-part as
+  `@hour_bucket` and the week-part as `@week_part` (scalars). No user value is
+  interpolated into SQL. Results are cached with `st.cache_data` keyed by table
+  FQN, metric, segment, day-part and week-part.
 
 ### Presentation and errors
 
@@ -199,20 +208,19 @@ and adds a day-part control.
   it reads best against the light detailed basemap, and hue carries no meaning
   of its own. The metrics stay distinguishable through their scale and legend,
   which always names the metric and whether it was drawn linear or log.
-- `exclusivity_index` and `overall_index` use a linear scale; `volume_index`
+- `overall_index` uses a linear scale; `volume_index`
   spans about four orders of magnitude and uses a log scale.
 - The ramp direction follows the basemap; percentile clipping (p2/p98) keeps a
   few extreme cells from flattening it.
 - Missing configuration/permissions produce an actionable in-app message, not a
   traceback, with a local-CSV fallback offered — as on Page 1.
-- Missing columns, non-numeric values, negative values, blank day-parts, and
-  invalid H3 indexes are reported with the affected row count.
+- Missing columns, non-numeric values, negative values, blank day-parts or
+  week-parts, and invalid H3 indexes are reported with the affected row count.
 
 ### 4b-i. Fixed defect — few cells, some in the ocean
 
-Page 2 previously read `data/map_2/exclusivity_index.csv` /
-`volume_index.csv`. That directory is empty and Git-ignored, so the page fell
-through to `data/sample_index.csv`, a **synthetic 45-cell, resolution-8** file —
+Page 2 previously read the per-metric CSVs under `data/map_2`. That directory
+is empty and Git-ignored, so the page fell through to `data/sample_index.csv`, a **synthetic 45-cell, resolution-8** file —
 it was never connected to the real dataset. The two reported symptoms follow
 directly: "only a few cells" (45 vs ~60.2k), and "cells in the ocean" (a
 resolution-8 hexagon covers ~7x the area of a resolution-9 one, so a coastal
@@ -243,7 +251,7 @@ h3-analysis/
 |   |-- bigquery_source.py    # Streamlit-free BigQuery config + query builders (both pages)
 |   |-- data.py               # Validation and aggregation helpers (index + day-section)
 |   |-- colors.py             # Sequential ramps and scaling for the index metrics
-|   |-- mapping.py            # Shared PyDeck H3 rendering, basemaps, segment checkboxes
+|   |-- mapping.py            # Shared PyDeck H3 rendering, basemaps, segment radio
 |   `-- config.py             # Loads the Git-ignored local .env (identifiers only)
 |-- scripts/
 |   `-- check_bigquery.py     # Verifies config, permissions, and schemas for both pages
@@ -279,15 +287,17 @@ h3-analysis/
   changes, aggregating (`AVG`) server-side in two steps, with the segment filter
   bound as a query parameter.
 - Page 2 queries its three `*_day_sections` BigQuery tables from configuration,
-  aggregating (`AVG`) server-side in one step, with the segment filter and the
-  day-part both bound as query parameters.
+  aggregating (`AVG`) server-side in one step, with the segment filter, the
+  day-part and the week-part all bound as query parameters.
 - Missing BigQuery config/permissions show an actionable message on **both**
   pages; the local fallback still works on both.
-- Each page's metric radio switches Overall / Volume / Exclusivity, each from
-  its own table.
-- Page 2 has a day-part filter covering every `hour_bucket` value in its
-  tables, and always aggregates within exactly one day-part.
-- All discovered segments appear as independent checkboxes on each page.
+- Each page's metric radio switches Overall / Volume, each from its own table.
+  Exclusivity is offered nowhere.
+- Page 2 has a day-part filter covering every `hour_bucket` value in its tables
+  and a week-part filter covering every `Week_part` value, and always aggregates
+  within exactly one of each.
+- All discovered segments appear in the sidebar radio on each page, one
+  selectable at a time.
 - Valid H3 cells render in their correct UAE locations, at the resolution the
   source table actually uses (9 for the live tables). Page 2 renders tens of
   thousands of cells; a count in the tens means it fell back to synthetic data.

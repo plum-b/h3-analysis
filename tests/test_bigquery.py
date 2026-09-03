@@ -8,6 +8,7 @@ from h3_analysis.bigquery_source import (
     BigQueryCredentialsError,
     REQUIRED_SERVICE_ACCOUNT_FIELDS,
     SERVICE_ACCOUNT_SECRET_KEY,
+    WEEK_PART_COLUMN,
     billing_project,
     credentials_source,
     build_day_parts_query,
@@ -15,12 +16,26 @@ from h3_analysis.bigquery_source import (
     build_index_query,
     build_segments_query,
     build_two_hour_periods_query,
+    build_week_parts_query,
     coerce_two_hour_period,
     day_section_table_fqn,
     index_table_fqn,
     service_account_info,
 )
-from h3_analysis.data import DataValidationError, validate_aggregated_cells
+from h3_analysis.data import (
+    PAGE1_METRICS,
+    PAGE2_METRICS,
+    DataValidationError,
+    validate_aggregated_cells,
+)
+
+
+def _page_source(relative_path: str) -> str:
+    """Read a repository file for the "is it really gone" source checks."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return (root / relative_path).read_text(encoding="utf-8")
 
 
 class TableFqnTests(unittest.TestCase):
@@ -39,15 +54,15 @@ class TableFqnTests(unittest.TestCase):
             "BIGQUERY_PROJECT_ID": "your-gcp-project",
             "BIGQUERY_DATASET": "your_dataset",
             "BIGQUERY_VOLUME_INDEX_TABLE": "volume_index_table",
-            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "exclusivity_index_table",
+            "BIGQUERY_OVERALL_INDEX_TABLE": "overall_index_table",
         }
         self.assertEqual(
             index_table_fqn("volume_index", env),
             "your-gcp-project.your_dataset.volume_index_table",
         )
         self.assertEqual(
-            index_table_fqn("exclusivity_index", env),
-            "your-gcp-project.your_dataset.exclusivity_index_table",
+            index_table_fqn("overall_index", env),
+            "your-gcp-project.your_dataset.overall_index_table",
         )
 
     def test_missing_config_names_the_metric_specific_var(self):
@@ -234,10 +249,10 @@ class DayFqnTests(unittest.TestCase):
         env = {
             "BIGQUERY_PROJECT_ID": "your-gcp-project",
             "BIGQUERY_DATASET": "your_dataset",
-            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "exclusivity_index_table",
+            "BIGQUERY_VOLUME_INDEX_TABLE": "volume_index_table",
         }
         with self.assertRaises(BigQueryConfigError):
-            day_section_table_fqn("exclusivity_index", env)
+            day_section_table_fqn("volume_index", env)
 
     def test_missing_config_names_the_metric_specific_var(self):
         env = {"BIGQUERY_PROJECT_ID": "your-gcp-project", "BIGQUERY_DATASET": "your_dataset"}
@@ -255,11 +270,11 @@ class DaySectionQueryConstructionTests(unittest.TestCase):
     fqn = "your-gcp-project.your_dataset.volume_index_day_sections_table"
 
     def test_query_is_single_step_not_two_step(self):
-        """No per-pair duplication on the live day-section tables (verified:
-        max repeat of (h3_id, segment, hour_bucket) is 1), so unlike Page 1
-        this must NOT use a per-pair CTE."""
+        """No per-row duplication on the live day-section tables (verified:
+        max repeat of (h3_id, segment, hour_bucket, Week_part) is 1), so unlike
+        Page 1 this must NOT use a per-pair CTE."""
         sql, params = build_day_section_index_query(
-            self.fqn, "volume_index", ["Families", "HNWI"], "Morning"
+            self.fqn, "volume_index", ["Families", "HNWI"], "Morning", "Weekday"
         )
         self.assertNotIn("per_pair", sql)
         self.assertIn("AVG(volume_index) AS volume_index", sql)
@@ -269,53 +284,132 @@ class DaySectionQueryConstructionTests(unittest.TestCase):
         self.assertIn("@hour_bucket", sql)
         self.assertEqual(sql.count(f"`{self.fqn}`"), 1)
         self.assertEqual(
-            params, {"segments": ["Families", "HNWI"], "hour_bucket": "Morning"}
+            params,
+            {
+                "segments": ["Families", "HNWI"],
+                "hour_bucket": "Morning",
+                "week_part": "Weekday",
+            },
         )
 
-    def test_every_metric_uses_the_single_step_shape(self):
-        from h3_analysis.data import PAGE2_METRICS
+    def test_week_part_is_a_bound_parameter_not_sql_text(self):
+        """The Weekday/Weekend radio value reaches BigQuery as @week_part."""
+        sql, params = build_day_section_index_query(
+            self.fqn, "overall_index", ["Families"], "Morning", "Weekend"
+        )
+        self.assertIn(f"AND {WEEK_PART_COLUMN} = @week_part", sql)
+        self.assertNotIn("Weekend", sql)
+        self.assertEqual(params["week_part"], "Weekend")
 
+    def test_day_part_and_week_part_filter_together(self):
+        """Both filters must survive in the same WHERE clause - dropping
+        either would average the other dimension's slices back together."""
+        sql, params = build_day_section_index_query(
+            self.fqn, "overall_index", ["HNWI"], "Night", "Weekend"
+        )
+        where = sql.split("WHERE", 1)[1]
+        self.assertIn("segment IN UNNEST(@segments)", where)
+        self.assertIn("hour_bucket = @hour_bucket", where)
+        self.assertIn(f"{WEEK_PART_COLUMN} = @week_part", where)
+        self.assertEqual(
+            params,
+            {
+                "segments": ["HNWI"],
+                "hour_bucket": "Night",
+                "week_part": "Weekend",
+            },
+        )
+
+    def test_week_part_applies_to_every_remaining_metric(self):
+        for metric in PAGE2_METRICS:
+            with self.subTest(metric=metric):
+                sql, params = build_day_section_index_query(
+                    self.fqn, metric, ["Families"], "Noon", "Weekday"
+                )
+                self.assertIn(f"AVG({metric}) AS {metric}", sql)
+                self.assertIn(f"AND {WEEK_PART_COLUMN} = @week_part", sql)
+                self.assertEqual(params["week_part"], "Weekday")
+
+    def test_every_metric_uses_the_single_step_shape(self):
         for metric in PAGE2_METRICS:
             with self.subTest(metric=metric):
                 sql, _ = build_day_section_index_query(
-                    self.fqn, metric, ["Families"], "Noon"
+                    self.fqn, metric, ["Families"], "Noon", "Weekday"
                 )
                 self.assertIn(f"AVG({metric}) AS {metric}", sql)
                 self.assertNotIn("per_pair", sql)
 
+    def test_one_segment_is_still_bound_as_an_array_parameter(self):
+        """The sidebar now selects a single segment; it must still travel as
+        the @segments array rather than being spliced into the SQL."""
+        sql, params = build_day_section_index_query(
+            self.fqn, "volume_index", ["Potential Car Buyers"], "Noon", "Weekday"
+        )
+        self.assertIn("segment IN UNNEST(@segments)", sql)
+        self.assertNotIn("Potential Car Buyers", sql)
+        self.assertEqual(params["segments"], ["Potential Car Buyers"])
+
     def test_segment_and_day_part_values_never_appear_in_sql_text(self):
         sql, _ = build_day_section_index_query(
-            self.fqn, "overall_index", ["Fam'ilies", "HN;WI"], "Morning'; --"
+            self.fqn,
+            "overall_index",
+            ["Fam'ilies", "HN;WI"],
+            "Morning'; --",
+            "Weekend'; DROP TABLE",
         )
         self.assertNotIn("Fam'ilies", sql)
         self.assertNotIn("HN;WI", sql)
         self.assertNotIn("Morning'; --", sql)
+        self.assertNotIn("DROP TABLE", sql)
 
     def test_unknown_metric_rejected(self):
         with self.assertRaises(ValueError):
-            build_day_section_index_query(self.fqn, "drop_table", ["Families"], "Noon")
+            build_day_section_index_query(
+                self.fqn, "drop_table", ["Families"], "Noon", "Weekday"
+            )
 
     def test_empty_segments_rejected(self):
         with self.assertRaises(ValueError):
-            build_day_section_index_query(self.fqn, "volume_index", [], "Noon")
+            build_day_section_index_query(
+                self.fqn, "volume_index", [], "Noon", "Weekday"
+            )
 
     def test_empty_hour_bucket_rejected(self):
         with self.assertRaises(ValueError):
-            build_day_section_index_query(self.fqn, "volume_index", ["Families"], "")
+            build_day_section_index_query(
+                self.fqn, "volume_index", ["Families"], "", "Weekday"
+            )
+
+    def test_empty_week_part_rejected(self):
+        """Without a week-part the query would blend Weekday and Weekend."""
+        with self.assertRaises(ValueError):
+            build_day_section_index_query(
+                self.fqn, "volume_index", ["Families"], "Noon", ""
+            )
 
     def test_page2_has_no_two_hour_period_filter(self):
-        """Page 2 slices by day-part only; the two-hour slicer is Page 1 only."""
+        """Page 2 slices by day-part and week-part; the two-hour slicer is
+        Page 1 only."""
         sql, params = build_day_section_index_query(
-            self.fqn, "overall_index", ["Families"], "Morning"
+            self.fqn, "overall_index", ["Families"], "Morning", "Weekday"
         )
         self.assertNotIn("two_hour_period", sql)
         self.assertNotIn("two_hour_period", params)
-        self.assertEqual(set(params), {"segments", "hour_bucket"})
+        self.assertEqual(set(params), {"segments", "hour_bucket", "week_part"})
 
     def test_day_parts_query_selects_only_hour_bucket(self):
         sql = build_day_parts_query(self.fqn)
         self.assertIn("SELECT DISTINCT hour_bucket", sql)
         self.assertNotIn("segment", sql)
+
+    def test_week_parts_query_reads_the_domain_from_the_table(self):
+        """Weekday/Weekend is never hard-coded; the selector offers whatever
+        the table holds."""
+        sql = build_week_parts_query(self.fqn)
+        self.assertIn(f"SELECT DISTINCT {WEEK_PART_COLUMN}", sql)
+        self.assertIn(f"`{self.fqn}`", sql)
+        self.assertNotIn("Weekday", sql)
+        self.assertNotIn("Weekend", sql)
 
 
 class AggregatedValidationTests(unittest.TestCase):
@@ -421,6 +515,153 @@ class ServiceAccountSecretTests(unittest.TestCase):
         self.assertEqual(
             info["private_key"],
             "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+        )
+
+
+class Page1HasNoWeekPartTests(unittest.TestCase):
+    """Week_part exists only on the day-section tables, so neither Page 1's
+    query nor its page may grow a Weekday/Weekend filter."""
+
+    fqn = "your-gcp-project.your_dataset.overall_index_table"
+
+    def test_two_hour_query_has_no_week_part_filter(self):
+        sql, params = build_index_query(self.fqn, "overall_index", ["Families"], 8)
+        self.assertNotIn(WEEK_PART_COLUMN, sql)
+        self.assertNotIn("week_part", params)
+
+    def test_page1_source_has_no_week_part_selector(self):
+        source = _page_source("pages/1_Two-Hour_Index_Analysis.py")
+        self.assertNotIn("build_week_parts_query", source)
+        self.assertNotIn("week_part_radio", source)
+        self.assertNotIn('"Week part"', source)
+
+
+class SingleSegmentSelectorTests(unittest.TestCase):
+    """The sidebar selects exactly one segment, with radio buttons and no
+    "Select all"."""
+
+    def test_selector_is_a_radio_returning_one_segment(self):
+        from unittest.mock import MagicMock, patch
+
+        from h3_analysis import mapping
+
+        with patch.object(mapping, "st") as fake:
+            fake.sidebar = MagicMock()
+            fake.sidebar.radio.return_value = "HNWI"
+            selected = mapping.segment_radio(["Families", "HNWI"])
+
+        self.assertEqual(selected, "HNWI")
+        self.assertEqual(fake.sidebar.radio.call_count, 1)
+        self.assertEqual(
+            fake.sidebar.radio.call_args.args[1], ["Families", "HNWI"]
+        )
+        fake.sidebar.checkbox.assert_not_called()
+
+    def test_no_checkbox_selector_survives(self):
+        from h3_analysis import mapping
+
+        self.assertFalse(hasattr(mapping, "segment_checkboxes"))
+
+    def test_both_pages_use_the_shared_radio_and_offer_no_select_all(self):
+        for page in (
+            "pages/1_Two-Hour_Index_Analysis.py",
+            "pages/2_Day-Part_Index_Analysis.py",
+        ):
+            with self.subTest(page=page):
+                source = _page_source(page)
+                self.assertIn("segment_radio(", source)
+                self.assertNotIn("segment_checkboxes", source)
+                self.assertNotIn("Select all", source)
+
+
+class ExclusivityRemovalTests(unittest.TestCase):
+    """The exclusivity index is gone from the application: no selector, no
+    label, no legend, no table, no query."""
+
+    def test_not_a_metric_on_either_page(self):
+        self.assertNotIn("exclusivity_index", PAGE1_METRICS)
+        self.assertNotIn("exclusivity_index", PAGE2_METRICS)
+
+    def test_has_no_label_help_ramp_or_scale(self):
+        from h3_analysis import colors
+
+        for name in ("METRIC_LABELS", "METRIC_HELP", "METRIC_RAMPS", "METRIC_SCALES"):
+            with self.subTest(registry=name):
+                self.assertNotIn("exclusivity_index", getattr(colors, name))
+
+    def test_no_table_resolves_even_with_the_old_env_vars_set(self):
+        """A leftover BIGQUERY_EXCLUSIVITY_* variable must not resurrect it."""
+        env = {
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
+            "BIGQUERY_EXCLUSIVITY_INDEX_TABLE": "exclusivity_index_table",
+            "BIGQUERY_EXCLUSIVITY_INDEX_DAY_SECTIONS_TABLE": (
+                "exclusivity_index_day_sections_table"
+            ),
+        }
+        with self.assertRaises(BigQueryConfigError):
+            index_table_fqn("exclusivity_index", env)
+        with self.assertRaises(BigQueryConfigError):
+            day_section_table_fqn("exclusivity_index", env)
+
+    def test_no_query_can_be_built_for_it(self):
+        table = "your-gcp-project.your_dataset.t"
+        with self.assertRaises(ValueError):
+            build_index_query(table, "exclusivity_index", ["Families"], 8)
+        with self.assertRaises(ValueError):
+            build_day_section_index_query(
+                table, "exclusivity_index", ["Families"], "Noon", "Weekday"
+            )
+
+    def test_absent_from_the_app(self):
+        for name in (
+            "app.py",
+            "pages/1_Two-Hour_Index_Analysis.py",
+            "pages/2_Day-Part_Index_Analysis.py",
+            "h3_analysis/colors.py",
+            "h3_analysis/mapping.py",
+            "data/sample_index_day_sections.csv",
+        ):
+            with self.subTest(file=name):
+                self.assertNotIn("exclusivity", _page_source(name).lower())
+
+    def test_no_exclusivity_table_is_configured_anywhere(self):
+        """Neither the committed template nor the deploy workflow may still
+        set an exclusivity table variable."""
+        for name in (".env.example", ".github/workflows/deploy-cloud-run.yml"):
+            with self.subTest(file=name):
+                text = _page_source(name).upper()
+                self.assertNotIn("BIGQUERY_EXCLUSIVITY", text)
+
+
+class DaySectionSampleFileTests(unittest.TestCase):
+    """The committed Page 2 fallback must satisfy the contract it feeds."""
+
+    def test_sample_carries_both_week_parts_for_every_day_part(self):
+        frame = pd.read_csv("data/sample_index_day_sections.csv")
+        self.assertEqual(sorted(frame[WEEK_PART_COLUMN].unique()), ["Weekday", "Weekend"])
+        self.assertEqual(
+            sorted(frame["hour_bucket"].unique()),
+            ["After noon", "Morning", "Night", "Noon", "Other"],
+        )
+        counts = frame.groupby(["hour_bucket", WEEK_PART_COLUMN]).size().unstack()
+        self.assertTrue((counts["Weekday"] == counts["Weekend"]).all())
+
+    def test_sample_validates_for_every_remaining_metric(self):
+        from h3_analysis.data import validate_day_section_data
+
+        frame = pd.read_csv("data/sample_index_day_sections.csv")
+        for metric in PAGE2_METRICS:
+            with self.subTest(metric=metric):
+                result = validate_day_section_data(frame, metric)
+                self.assertEqual(result.removed_rows, 0)
+        resolutions = {h3.get_resolution(cell) for cell in frame["h3_id"].unique()}
+        self.assertEqual(resolutions, {9})
+        self.assertEqual(
+            frame.groupby(
+                ["h3_id", "segment", "hour_bucket", WEEK_PART_COLUMN]
+            ).size().max(),
+            1,
         )
 
 

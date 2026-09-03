@@ -5,8 +5,8 @@ Run this before launching the app or deploying:
     python3 scripts/check_bigquery.py
 
 It resolves each metric's table from configuration, confirms the expected
-columns exist, and runs the real segment (+ day-part, for Page 2) and
-aggregation queries against a single segment so the cost stays negligible.
+columns exist, and runs the real segment (+ day-part and week-part, for Page 2)
+and aggregation queries against a single segment so the cost stays negligible.
 Nothing is written; no credential is read from the repository - authentication
 is a ``[gcp_service_account]`` secret when one is configured (the Streamlit
 Cloud path, readable here from a Git-ignored ``.streamlit/secrets.toml``),
@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from h3_analysis.bigquery_source import (  # noqa: E402
     BigQueryConfigError,
     BigQueryCredentialsError,
+    WEEK_PART_COLUMN,
     billing_project,
     credentials_source,
     build_day_parts_query,
@@ -30,6 +31,7 @@ from h3_analysis.bigquery_source import (  # noqa: E402
     build_index_query,
     build_segments_query,
     build_two_hour_periods_query,
+    build_week_parts_query,
     day_section_table_fqn,
     get_client,
     index_table_fqn,
@@ -123,7 +125,7 @@ def check_page2_metric(client, metric: str) -> bool:
 
     columns = {field.name: field.field_type for field in table.schema}
     print(f"rows    {table.num_rows:,}")
-    required = ("h3_id", "segment", "hour_bucket", metric)
+    required = ("h3_id", "segment", "hour_bucket", WEEK_PART_COLUMN, metric)
     missing = [name for name in required if name not in columns]
     if missing:
         print(f"FAIL  Missing expected column(s): {', '.join(missing)}")
@@ -140,17 +142,28 @@ def check_page2_metric(client, metric: str) -> bool:
         day_part_values = sorted(day_parts["hour_bucket"].dropna().astype(str))
         print(f"day-parts {len(day_part_values)}: {', '.join(day_part_values)}")
 
-        if not segment_values or not day_part_values:
-            print("FAIL  No segments or day-parts returned.")
+        week_parts = run_query(build_week_parts_query(table_fqn), client=client)
+        week_part_values = sorted(
+            week_parts[WEEK_PART_COLUMN].dropna().astype(str)
+        )
+        print(f"week-parts {len(week_part_values)}: {', '.join(week_part_values)}")
+
+        if not segment_values or not day_part_values or not week_part_values:
+            print("FAIL  No segments, day-parts or week-parts returned.")
             return False
 
         sql, params = build_day_section_index_query(
-            table_fqn, metric, segment_values[:1], day_part_values[0]
+            table_fqn,
+            metric,
+            segment_values[:1],
+            day_part_values[0],
+            week_part_values[0],
         )
         frame = run_query(sql, params, client=client)
         print(
             f"query   OK - {len(frame):,} cells for segment "
-            f"'{segment_values[0]}', day-part '{day_part_values[0]}'"
+            f"'{segment_values[0]}', day-part '{day_part_values[0]}', "
+            f"week-part '{week_part_values[0]}'"
         )
         if not frame.empty:
             column = frame[metric]

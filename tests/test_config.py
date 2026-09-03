@@ -94,11 +94,14 @@ class ShippedExampleConfigTests(unittest.TestCase):
                 self.assertTrue(all(fqn.split(".")))
 
     def test_example_gives_each_metric_and_page_its_own_table(self):
-        """Six distinct tables - a copy-paste slip would collide them."""
+        """One distinct table per metric per page - a copy-paste slip would
+        collide them. Two metrics x two pages since exclusivity was removed."""
         env = self._env_from_example()
         fqns = [index_table_fqn(m, env) for m in PAGE1_METRICS]
         fqns += [day_section_table_fqn(m, env) for m in PAGE2_METRICS]
-        self.assertEqual(len(set(fqns)), 6)
+        self.assertEqual(
+            len(set(fqns)), len(PAGE1_METRICS) + len(PAGE2_METRICS)
+        )
 
     def test_example_carries_no_real_identifiers(self):
         """The public template must stay placeholders, not the live names."""

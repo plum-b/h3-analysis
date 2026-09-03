@@ -90,25 +90,27 @@ def is_dark_basemap(choice: str) -> bool:
     return choice == BASEMAP_DARK
 
 
-def segment_checkboxes(segment_values: list) -> list:
-    """Render the shared sidebar segment checkboxes; stop if none are selected.
+def segment_radio(segment_values: list) -> str:
+    """Render the shared sidebar segment selector and return the one segment.
 
-    Shared by both pages so "select all" and per-segment behavior stay
-    identical between them.
+    Exactly one segment is shown at a time: radio buttons make that visible in
+    the control itself, so the map always answers "where is *this* audience"
+    rather than showing an average over a set the reader has to reconstruct
+    from checkboxes. There is deliberately no "select all".
+
+    Shared by both pages so the selector behaves identically on each.
     """
-    st.sidebar.subheader("Segments")
-    select_all = st.sidebar.checkbox("Select all", value=True)
-    selected = [
-        segment
-        for segment in segment_values
-        if st.sidebar.checkbox(
-            segment, value=select_all, key=f"segment_{select_all}_{segment}"
-        )
-    ]
-    if not selected:
-        st.warning("Select at least one segment to display the map.")
+    st.sidebar.subheader("Segment")
+    if not segment_values:
+        st.warning("No segments are available to display.")
         st.stop()
-    return selected
+    return st.sidebar.radio(
+        "Audience segment",
+        segment_values,
+        index=0,
+        key="segment",
+        help="The map shows one audience segment at a time.",
+    )
 
 
 def map_center(frame: pd.DataFrame) -> tuple:

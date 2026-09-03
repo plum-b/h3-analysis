@@ -1,20 +1,22 @@
 """Page 2 - Day-part index analysis map (BigQuery).
 
-Page 2 shows one index metric at a time - Overall, Volume or Exclusivity -
-each stored in its own "*_day_sections" BigQuery table with the schema
-``h3_id`` / ``segment`` / ``<metric>`` / ``hour_bucket`` (the day-part
-dimension - Morning / Noon / After noon / Night / Other on the live tables).
-Unlike Page 1, each ``(h3_id, segment, hour_bucket)`` triple is NOT repeated on
-the live tables (verified against BigQuery), so the metric is averaged across
-the selected segments in a single step - see
-:func:`h3_analysis.bigquery_source.build_day_section_index_query`.
+Page 2 shows one index metric at a time - Overall or Volume - each stored in
+its own "*_day_sections" BigQuery table with the schema ``h3_id`` /
+``segment`` / ``<metric>`` / ``hour_bucket`` (the day-part dimension -
+Morning / Noon / After noon / Night / Other on the live tables) /
+``Week_part`` (Weekday / Weekend).
+
+The two time filters apply together: the map always shows exactly one day-part
+of exactly one week-part, for exactly one audience segment. Unlike Page 1, each
+``(h3_id, segment, hour_bucket, Week_part)`` row is NOT repeated on the live
+tables (verified against BigQuery), so the metric is averaged in a single step
+- see :func:`h3_analysis.bigquery_source.build_day_section_index_query`.
 
 Production reads BigQuery. A local CSV (uploaded, or the committed synthetic
 ``data/sample_index_day_sections.csv``) is an explicit development fallback;
 production does not depend on a production CSV. The former two-file,
-no-day-part local CSVs (``data/map_2/exclusivity_index.csv`` /
-``volume_index.csv``) are superseded by this day-section schema and are no
-longer read here - see README/CLAUDE.md for why (they were the cause of the
+no-day-part local CSVs under ``data/map_2`` are superseded by this day-section
+schema and are no longer read here - see README/CLAUDE.md for why (they were the cause of the
 "only a few cells, some in the ocean" bug: with no real data in ``data/map_2``,
 the page silently fell back to a 45-cell, resolution-8 synthetic sample that
 does not represent the real, resolution-9 UAE grid).
@@ -34,6 +36,7 @@ from h3_analysis.bigquery_source import (
     build_day_parts_query,
     build_day_section_index_query,
     build_segments_query,
+    build_week_parts_query,
     day_section_table_fqn,
     run_query,
 )
@@ -47,6 +50,7 @@ from h3_analysis.colors import (
 from h3_analysis.config import load_local_env, prime_streamlit_secrets
 from h3_analysis.data import (
     PAGE2_METRICS,
+    WEEK_PART_COLUMN,
     DataValidationError,
     ValidationResult,
     aggregate_day_section_cells,
@@ -59,7 +63,7 @@ from h3_analysis.mapping import (
     basemap_style,
     is_dark_basemap,
     render_h3_map,
-    segment_checkboxes,
+    segment_radio,
 )
 
 # Streamlit Cloud passes configuration through st.secrets, which only reaches
@@ -87,12 +91,21 @@ def load_day_parts(table_fqn: str) -> list[str]:
     return sorted(frame["hour_bucket"].dropna().astype(str).unique())
 
 
+@st.cache_data(show_spinner="Reading available week-parts from BigQuery...")
+def load_week_parts(table_fqn: str) -> list[str]:
+    """Weekday / Weekend on the live tables - read, never hard-coded."""
+    frame = run_query(build_week_parts_query(table_fqn))
+    return sorted(frame[WEEK_PART_COLUMN].dropna().astype(str).unique())
+
+
 @st.cache_data(show_spinner="Querying the index from BigQuery...")
 def load_bigquery_cells(
-    table_fqn: str, metric: str, segments: tuple[str, ...], hour_bucket: str
+    table_fqn: str, metric: str, segment: str, hour_bucket: str, week_part: str
 ) -> pd.DataFrame:
+    """One segment, one day-part, one week-part. Every value is bound as a
+    query parameter; none of them reaches the SQL text."""
     sql, params = build_day_section_index_query(
-        table_fqn, metric, list(segments), hour_bucket
+        table_fqn, metric, [segment], hour_bucket, week_part
     )
     return run_query(sql, params)
 
@@ -159,7 +172,18 @@ def _access_error(table_fqn: str, error: Exception) -> None:
     st.stop()
 
 
-def bigquery_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
+def week_part_radio(week_part_values: list[str], key: str) -> str:
+    """Pick exactly one week-part; shown beside the day-part radio."""
+    return st.radio(
+        "Week part",
+        week_part_values,
+        horizontal=True,
+        key=key,
+        help="Weekday and weekend traffic are shown separately, never blended.",
+    )
+
+
+def bigquery_frame(metric: str) -> tuple[pd.DataFrame, str, str, str, str]:
     try:
         table_fqn = day_section_table_fqn(metric)
     except BigQueryConfigError as error:
@@ -170,6 +194,7 @@ def bigquery_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
     try:
         segment_values = load_segments(table_fqn)
         day_part_values = load_day_parts(table_fqn)
+        week_part_values = load_week_parts(table_fqn)
     except BigQueryCredentialsError as error:
         _credentials_error(error)
     except BigQueryConfigError as error:
@@ -183,15 +208,23 @@ def bigquery_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
     if not day_part_values:
         st.warning("The BigQuery table returned no day-parts.")
         st.stop()
+    if not week_part_values:
+        st.warning("The BigQuery table returned no week-parts.")
+        st.stop()
 
-    selected_segments = segment_checkboxes(segment_values)
+    selected_segment = segment_radio(segment_values)
     selected_day_part = st.radio(
         "Day part", day_part_values, horizontal=True, key="day_part"
     )
+    selected_week_part = week_part_radio(week_part_values, "week_part")
 
     try:
         raw = load_bigquery_cells(
-            table_fqn, metric, tuple(selected_segments), selected_day_part
+            table_fqn,
+            metric,
+            selected_segment,
+            selected_day_part,
+            selected_week_part,
         )
     except BigQueryCredentialsError as error:
         _credentials_error(error)
@@ -206,13 +239,14 @@ def bigquery_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
         )
     return (
         validation.data,
-        selected_segments,
+        selected_segment,
         selected_day_part,
+        selected_week_part,
         f"BigQuery `{table_fqn}`",
     )
 
 
-def local_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
+def local_frame(metric: str) -> tuple[pd.DataFrame, str, str, str, str]:
     uploaded = st.sidebar.file_uploader("Upload day-section index CSV", type="csv")
     if uploaded is not None:
         contents, source_name = uploaded.getvalue(), uploaded.name
@@ -222,8 +256,8 @@ def local_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
         source_name = f"{LOCAL_SAMPLE_FILE} (synthetic)"
     else:
         st.info(
-            "Upload a CSV with `h3_id`, `segment`, `hour_bucket` and a metric "
-            "column to use the local fallback."
+            "Upload a CSV with `h3_id`, `segment`, `hour_bucket`, `Week_part` "
+            "and a metric column to use the local fallback."
         )
         st.stop()
 
@@ -232,26 +266,36 @@ def local_frame(metric: str) -> tuple[pd.DataFrame, list[str], str, str]:
     if validation.removed_rows:
         st.warning(
             f"Excluded {validation.removed_rows:,} invalid row(s). "
-            "Check H3 indexes, segments, day-parts, and metric values."
+            "Check H3 indexes, segments, day-parts, week-parts, and metric "
+            "values."
         )
 
     data = validation.data
     segment_values = sorted(data["segment"].unique().tolist())
     day_part_values = sorted(data["hour_bucket"].unique().tolist())
-    selected_segments = segment_checkboxes(segment_values)
+    week_part_values = sorted(data[WEEK_PART_COLUMN].unique().tolist())
+    selected_segment = segment_radio(segment_values)
     selected_day_part = st.radio(
         "Day part", day_part_values, horizontal=True, key="day_part"
     )
+    selected_week_part = week_part_radio(week_part_values, "week_part")
     aggregated = aggregate_day_section_cells(
-        data, selected_segments, selected_day_part, metric
+        data, [selected_segment], selected_day_part, selected_week_part, metric
     )
-    return aggregated, selected_segments, selected_day_part, source_name
+    return (
+        aggregated,
+        selected_segment,
+        selected_day_part,
+        selected_week_part,
+        source_name,
+    )
 
 
 st.title("Day-Part Index Analysis")
 st.caption(
-    "Page 2 of 2. Index analysis by location, audience segment and day-part "
-    "(Morning / Noon / After noon / Night / Other)."
+    "Page 2 of 2. Index analysis by location, audience segment, day-part "
+    "(Morning / Noon / After noon / Night / Other) and week-part "
+    "(Weekday / Weekend)."
 )
 
 metric = st.radio(
@@ -278,9 +322,21 @@ source_mode = st.sidebar.radio(
 
 try:
     if source_mode == SOURCE_BIGQUERY:
-        cells, selected_segments, selected_day_part, source_name = bigquery_frame(metric)
+        (
+            cells,
+            selected_segment,
+            selected_day_part,
+            selected_week_part,
+            source_name,
+        ) = bigquery_frame(metric)
     else:
-        cells, selected_segments, selected_day_part, source_name = local_frame(metric)
+        (
+            cells,
+            selected_segment,
+            selected_day_part,
+            selected_week_part,
+            source_name,
+        ) = local_frame(metric)
 except (DataValidationError, pd.errors.ParserError, UnicodeDecodeError) as error:
     st.error(f"Unable to use this data source: {error}")
     st.stop()
@@ -289,10 +345,15 @@ map_style = st.radio("Basemap", BASEMAP_OPTIONS, horizontal=True, key="basemap")
 style_url = basemap_style(map_style)
 dark_basemap = is_dark_basemap(map_style)
 
-st.subheader(f"{METRIC_LABELS[metric]} by H3 cell - {selected_day_part}")
+st.subheader(
+    f"{METRIC_LABELS[metric]} by H3 cell - {selected_day_part}, "
+    f"{selected_week_part}"
+)
 
 if cells.empty:
-    st.info("No H3 cells match the selected segments and day-part.")
+    st.info(
+        "No H3 cells match the selected segment, day-part and week-part."
+    )
     st.stop()
 
 values = cells[metric]
@@ -303,7 +364,7 @@ cells = cells.assign(
 
 summary_columns = st.columns(4)
 summary_columns[0].metric("Visible H3 cells", f"{len(cells):,}")
-summary_columns[1].metric("Segments", f"{len(selected_segments):,}")
+summary_columns[1].metric("Segment", selected_segment)
 summary_columns[2].metric(
     "Median", format_value(float(values.median()), metric)
 )
@@ -322,14 +383,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.caption(
-    "Values are averaged across the selected segments for each H3 cell, for "
-    f"the {selected_day_part} day-part. Data source: {source_name}."
+    f"Values are the {selected_segment} average for each H3 cell, for the "
+    f"{selected_day_part} day-part on a {selected_week_part}. "
+    f"Data source: {source_name}."
 )
 
 st.download_button(
     "Download results",
     data=cells[["h3_id", metric]].to_csv(index=False).encode("utf-8"),
-    file_name=f"h3-{metric}-{selected_day_part}.csv",
+    file_name=f"h3-{metric}-{selected_day_part}-{selected_week_part}.csv",
     mime="text/csv",
 )
 

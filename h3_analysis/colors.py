@@ -6,12 +6,12 @@ everywhere keeps the map legible whichever metric is on screen and stops the
 hue itself carrying meaning it never had.
 
 What still separates the metrics is the part that is actually quantitative:
-each keeps its own scale and its own legend. ``exclusivity_index`` and
-``overall_index`` use a linear scale; ``volume_index`` spans roughly four
-orders of magnitude, so a linear scale would collapse almost every cell onto
-the lightest step and it uses a log scale instead. The legend always names the
-metric and the scale it was drawn with, so a shared hue can never be mistaken
-for a shared range - the ramp is normalized per metric, per selection.
+each keeps its own scale and its own legend. ``overall_index`` uses a linear
+scale; ``volume_index`` spans roughly four orders of magnitude, so a linear
+scale would collapse almost every cell onto the lightest step and it uses a log
+scale instead. The legend always names the metric and the scale it was drawn
+with, so a shared hue can never be mistaken for a shared range - the ramp is
+normalized per metric, per selection.
 
 The ramp follows the sequential-color rule: one hue per magnitude encoding,
 stepped monotonically in lightness.
@@ -42,23 +42,20 @@ TEAL_GREEN_RAMP = (
     "#2a917e", "#257f6f", "#1f6d60", "#1a5c50", "#144b41", "#0f3a32",
 )
 
-# One ramp for every metric, on both pages. The per-metric entries stay so a
+# One ramp for both metrics, on both pages. The per-metric entries stay so a
 # metric can be re-pointed at its own hue without touching call sites.
 METRIC_RAMPS = {
     "overall_index": ORANGE_RAMP,
-    "exclusivity_index": ORANGE_RAMP,
     "volume_index": ORANGE_RAMP,
 }
 
 METRIC_SCALES = {
     "overall_index": "linear",
-    "exclusivity_index": "linear",
     "volume_index": "log",
 }
 
 METRIC_LABELS = {
     "overall_index": "Overall index",
-    "exclusivity_index": "Exclusivity index",
     "volume_index": "Volume index",
 }
 
@@ -66,10 +63,6 @@ METRIC_HELP = {
     "overall_index": (
         "A combined overall score for each cell and segment. Higher means a "
         "stronger overall signal for that audience in the cell."
-    ),
-    "exclusivity_index": (
-        "How concentrated a segment is in a cell relative to its overall "
-        "presence. Higher means the cell is more distinctive for that segment."
     ),
     "volume_index": (
         "The share of a segment's total activity that falls in a cell. Higher "

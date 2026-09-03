@@ -6,8 +6,8 @@ pages cache the results of :func:`run_query`.
 
 Page 1 shows one index metric at a time, each stored in its own BigQuery table
 with the logical schema ``h3_id`` (STRING), ``segment`` (STRING) and one numeric
-metric column named after the metric (``overall_index`` / ``volume_index`` /
-``exclusivity_index``), plus an ``hour_bucket`` (INT64) column holding the
+metric column named after the metric (``overall_index`` / ``volume_index``),
+plus an ``hour_bucket`` (INT64) column holding the
 **two-hour period** of the day: 0, 2, 4 ... 22 on the live tables. Each
 ``(h3_id, segment, hour_bucket)`` triple appears exactly once (verified against
 BigQuery), which is what makes a ``(h3_id, segment)`` pair look "repeated"
@@ -19,13 +19,15 @@ Both pages' tables name this column ``hour_bucket``, but the domains differ:
 Page 1 stores INT64 two-hour periods, Page 2 STRING day-part labels. The two
 are never mixed.
 
-Page 2 shows the same three metrics from a parallel set of "*_day_sections"
+Page 2 shows the same two metrics from a parallel set of "*_day_sections"
 tables that add an ``hour_bucket`` (day-part, e.g. Morning/Noon/After
-noon/Night/Other) column. Verified against the live tables: each
-``(h3_id, segment, hour_bucket)`` triple is NOT repeated (max repeat count is
-1), so :func:`build_day_section_index_query` averages across segments in a
-single step - do not add a Page-1-style per-pair CTE here, it would just
-average groups that already have exactly one row.
+noon/Night/Other) column and a ``Week_part`` (Weekday/Weekend) column. Verified
+against the live tables: each ``(h3_id, segment, hour_bucket, Week_part)`` row
+is NOT repeated (max repeat count is 1), so
+:func:`build_day_section_index_query` averages across segments in a single step
+- do not add a Page-1-style per-pair CTE here, it would just average groups
+that already have exactly one row. ``Week_part`` exists only on the day-section
+tables; Page 1's tables have no such column and no week-part selector.
 
 Configuration comes entirely from the environment. Per metric, either:
 
@@ -34,9 +36,9 @@ Configuration comes entirely from the environment. Per metric, either:
 
 (Page 2 uses the same two forms with a ``_DAY_SECTIONS`` infix, e.g.
 ``BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE``.) ``<METRIC>`` is
-``OVERALL_INDEX``, ``VOLUME_INDEX`` or ``EXCLUSIVITY_INDEX``. Nothing about the
-project, dataset, table, credentials or filter values is hard-coded. Segment
-(and day-part) filters are always passed as query parameters.
+``OVERALL_INDEX`` or ``VOLUME_INDEX``. Nothing about the project, dataset,
+table, credentials or filter values is hard-coded. Segment, day-part and
+week-part filters are always passed as query parameters.
 
 Credentials come from the platform, never from this repository - a
 ``[gcp_service_account]`` secret when one is configured (the Streamlit
@@ -70,6 +72,10 @@ _ENV_BILLING_PROJECT = "BIGQUERY_BILLING_PROJECT"
 # Both pages' tables call the time column ``hour_bucket``. On Page 1 it holds
 # INT64 two-hour periods (0, 2, ... 22); on Page 2, STRING day-part labels.
 TIME_COLUMN = "hour_bucket"
+
+# Page 2 only: the Weekday/Weekend split, applied together with the day-part.
+# Capitalised because that is the column name on the live day-section tables.
+WEEK_PART_COLUMN = "Week_part"
 
 
 def _metric_env(metric: str, infix: str = "") -> tuple[str, str]:
@@ -302,24 +308,48 @@ def build_day_parts_query(table_fqn: str) -> str:
     return _distinct_time_values_query(table_fqn)
 
 
+def build_week_parts_query(table_fqn: str) -> str:
+    """SQL returning Page 2's distinct ``Week_part`` values.
+
+    Weekday / Weekend on the live tables, but as with every other domain in
+    this module the values come from the table rather than from a hard-coded
+    list, so a third week-part would appear in the selector on its own.
+    """
+    return (
+        f"SELECT DISTINCT {WEEK_PART_COLUMN}\n"
+        f"FROM {_backtick(table_fqn)}\n"
+        f"WHERE {WEEK_PART_COLUMN} IS NOT NULL\n"
+        f"ORDER BY {WEEK_PART_COLUMN}"
+    )
+
+
 def build_day_section_index_query(
-    table_fqn: str, metric: str, segments: Sequence[str], hour_bucket: str
+    table_fqn: str,
+    metric: str,
+    segments: Sequence[str],
+    hour_bucket: str,
+    week_part: str,
 ) -> tuple[str, dict]:
     """Build the aggregated Page 2 day-section query and its named parameters.
 
-    Unlike Page 1's tables, each ``(h3_id, segment, hour_bucket)`` triple is
-    NOT repeated on the live day-section tables (verified against BigQuery:
-    max repeat count is 1), so this averages across the selected segments in a
-    **single** step - there is no duplicate-pair CTE to collapse first. This
-    mirrors :func:`h3_analysis.data.aggregate_day_section_cells` on the CSV
-    path (:func:`h3_analysis.data.collapse_day_section_duplicates` is a no-op
-    defensive step there for the same reason).
+    Both time filters apply together: exactly one day-part (``hour_bucket``)
+    and exactly one week-part (``Week_part``, Weekday or Weekend). Dropping
+    either would average the other's slices back together and quietly show a
+    different question's answer.
+
+    Unlike Page 1's tables, each ``(h3_id, segment, hour_bucket, Week_part)``
+    row is NOT repeated on the live day-section tables (verified against
+    BigQuery: max repeat count is 1), so this averages across the selected
+    segments in a **single** step - there is no duplicate-pair CTE to collapse
+    first. This mirrors :func:`h3_analysis.data.aggregate_day_section_cells` on
+    the CSV path (:func:`h3_analysis.data.collapse_day_section_duplicates` is a
+    no-op defensive step there for the same reason).
 
     Aggregation happens in BigQuery; only ``h3_id`` and the averaged metric
-    come back. Segment values travel as ``@segments`` (an array) and the
-    day-part as ``@hour_bucket`` (a scalar), never interpolated into the SQL
-    text. The metric name is validated against :data:`PAGE2_METRICS` before it
-    is used as a column identifier.
+    come back. Segment values travel as ``@segments`` (an array), the day-part
+    as ``@hour_bucket`` and the week-part as ``@week_part`` (scalars), never
+    interpolated into the SQL text. The metric name is validated against
+    :data:`PAGE2_METRICS` before it is used as a column identifier.
     """
     if metric not in PAGE2_METRICS:
         raise ValueError(
@@ -330,18 +360,25 @@ def build_day_section_index_query(
         raise ValueError("At least one segment is required.")
     if not hour_bucket:
         raise ValueError("A day-part (hour_bucket) is required.")
+    if not week_part:
+        raise ValueError("A week-part (Week_part) is required.")
     segments = [str(segment) for segment in segments]
 
     sql = (
         f"SELECT h3_id, AVG({metric}) AS {metric}\n"
         f"FROM {_backtick(table_fqn)}\n"
         "WHERE segment IN UNNEST(@segments)\n"
-        "  AND hour_bucket = @hour_bucket\n"
+        f"  AND {TIME_COLUMN} = @hour_bucket\n"
+        f"  AND {WEEK_PART_COLUMN} = @week_part\n"
         f"  AND {metric} IS NOT NULL\n"
         "GROUP BY h3_id\n"
         "ORDER BY h3_id"
     )
-    return sql, {"segments": segments, "hour_bucket": str(hour_bucket)}
+    return sql, {
+        "segments": segments,
+        "hour_bucket": str(hour_bucket),
+        "week_part": str(week_part),
+    }
 
 
 def _query_parameters(params: Mapping[str, object]):
