@@ -36,7 +36,8 @@ Only one map is shown per page. Index values are **averaged, never summed**.
 
 ## 2. Page 1 user workflow
 
-1. The user picks a metric (Overall / Volume).
+1. The user picks a metric (labelled "Exclusivity index" and "Volume index";
+   the underlying metric keys are `overall_index` and `volume_index`).
 2. The app queries that metric's BigQuery table (or, in the local fallback,
    loads the committed synthetic CSV / an upload).
 3. The user picks exactly one audience segment from a sidebar radio, and on
@@ -123,7 +124,9 @@ row count; invalid cells are excluded, never placed at an unrelated location.
 
 ### Filters
 
-- A metric radio (Overall / Volume) drives which table is queried.
+- A metric radio drives which table is queried. Labels are display names only:
+  `overall_index` is shown as "Exclusivity index", `volume_index` as "Volume
+  index".
 - Display the distinct `segment` values as a **radio** in the sidebar: exactly
   one segment is selected at a time, the first by default. There is no
   "select all" and no multi-segment selection.
@@ -291,8 +294,9 @@ h3-analysis/
   day-part and the week-part all bound as query parameters.
 - Missing BigQuery config/permissions show an actionable message on **both**
   pages; the local fallback still works on both.
-- Each page's metric radio switches Overall / Volume, each from its own table.
-  Exclusivity is offered nowhere.
+- Each page's metric radio switches the two metrics, each from its own table.
+  The `exclusivity_index` metric and its tables are gone; "Exclusivity index"
+  on screen is the display name of `overall_index`.
 - Page 2 has a day-part filter covering every `hour_bucket` value in its tables
   and a week-part filter covering every `Week_part` value, and always aggregates
   within exactly one of each.

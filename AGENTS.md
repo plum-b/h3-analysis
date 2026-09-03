@@ -34,7 +34,10 @@ A Streamlit app with **exactly two H3 index-analysis map pages**:
 Never render two maps on one page. Index values are **averaged, never summed**;
 never join the metric tables/files. The former `data/map_3` "Overall analysis
 index" CSV map and the hourly `user_count` map have been removed, and so has the
-**exclusivity index** — no selector, label, legend, table or query references it.
+**exclusivity index metric** — no `exclusivity_index` key, table or query. Note
+the display names are separate: `overall_index` is *labelled* "Exclusivity
+index" in `METRIC_LABELS` while its table and column keep the overall_index
+name.
 
 Segments are picked **one at a time** with the shared sidebar radio
 (`h3_analysis.mapping.segment_radio`): no checkboxes, no "select all".

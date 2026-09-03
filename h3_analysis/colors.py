@@ -54,8 +54,11 @@ METRIC_SCALES = {
     "volume_index": "log",
 }
 
+# Display names only. ``overall_index`` is shown as "Exclusivity index" by
+# request; the metric key, its BigQuery table and its column keep the
+# overall_index name, so nothing about the query or configuration changes.
 METRIC_LABELS = {
-    "overall_index": "Overall index",
+    "overall_index": "Exclusivity index",
     "volume_index": "Volume index",
 }
 

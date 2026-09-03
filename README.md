@@ -13,9 +13,11 @@ Only one map is shown per page, for **one audience segment at a time** — the
 sidebar selector is a radio, not checkboxes, and there is no "select all". The
 metric is averaged per `h3_id` (index values are **averaged, never summed**).
 
-The exclusivity index has been removed from the application: it appears in no
-selector, label or legend, its tables are not configured, and nothing queries
-them.
+The exclusivity index metric has been removed from the application: its tables
+are not configured and nothing queries them. Separately, and by request, the
+`overall_index` metric is **displayed as "Exclusivity index"** — a display name
+only. Its table, column, query and cache keys all keep the `overall_index`
+name, so the two things never meet.
 
 ## Current phase
 

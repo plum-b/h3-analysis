@@ -614,6 +614,9 @@ class ExclusivityRemovalTests(unittest.TestCase):
             )
 
     def test_absent_from_the_app(self):
+        """The metric is gone. The *label* "Exclusivity index" is a separate
+        matter - it is the display name of ``overall_index`` (see
+        MetricLabelTests), which is why this looks for the metric key."""
         for name in (
             "app.py",
             "pages/1_Two-Hour_Index_Analysis.py",
@@ -623,7 +626,7 @@ class ExclusivityRemovalTests(unittest.TestCase):
             "data/sample_index_day_sections.csv",
         ):
             with self.subTest(file=name):
-                self.assertNotIn("exclusivity", _page_source(name).lower())
+                self.assertNotIn("exclusivity_index", _page_source(name))
 
     def test_no_exclusivity_table_is_configured_anywhere(self):
         """Neither the committed template nor the deploy workflow may still
@@ -632,6 +635,55 @@ class ExclusivityRemovalTests(unittest.TestCase):
             with self.subTest(file=name):
                 text = _page_source(name).upper()
                 self.assertNotIn("BIGQUERY_EXCLUSIVITY", text)
+
+
+class MetricLabelTests(unittest.TestCase):
+    """Display names are decoupled from the metric keys: ``overall_index`` is
+    shown as "Exclusivity index", while its table, column and cache keys keep
+    the overall_index name."""
+
+    def test_overall_index_is_labelled_exclusivity_index(self):
+        from h3_analysis import colors
+
+        self.assertEqual(colors.METRIC_LABELS["overall_index"], "Exclusivity index")
+        self.assertEqual(colors.METRIC_LABELS["volume_index"], "Volume index")
+
+    def test_the_rename_did_not_touch_the_metric_key_or_its_table(self):
+        env = {
+            "BIGQUERY_PROJECT_ID": "your-gcp-project",
+            "BIGQUERY_DATASET": "your_dataset",
+            "BIGQUERY_OVERALL_INDEX_TABLE": "overall_index_table",
+            "BIGQUERY_OVERALL_INDEX_DAY_SECTIONS_TABLE": (
+                "overall_index_day_sections_table"
+            ),
+        }
+        self.assertIn("overall_index", PAGE1_METRICS)
+        self.assertEqual(
+            index_table_fqn("overall_index", env),
+            "your-gcp-project.your_dataset.overall_index_table",
+        )
+        self.assertEqual(
+            day_section_table_fqn("overall_index", env),
+            "your-gcp-project.your_dataset.overall_index_day_sections_table",
+        )
+        sql, _ = build_index_query(
+            "your-gcp-project.your_dataset.overall_index_table",
+            "overall_index",
+            ["Families"],
+            8,
+        )
+        self.assertIn("AVG(overall_index) AS overall_index", sql)
+        self.assertNotIn("Exclusivity", sql)
+
+    def test_every_label_reaches_the_legend(self):
+        from h3_analysis.colors import METRIC_LABELS, legend_html
+
+        for metric in PAGE1_METRICS:
+            with self.subTest(metric=metric):
+                self.assertIn(
+                    METRIC_LABELS[metric],
+                    legend_html(metric, 0.1, 0.9, dark_basemap=False),
+                )
 
 
 class DaySectionSampleFileTests(unittest.TestCase):

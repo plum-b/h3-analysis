@@ -31,9 +31,14 @@ Streamlit page because they use different data and analysis logic:
   A local CSV (upload or the synthetic
   `data/sample_index_day_sections.csv`) is a development fallback only.
 
-**The exclusivity index has been removed from the application.** It is offered
-by no selector, has no label, ramp, scale or legend entry, no configured table,
-and no query path. Do not reintroduce it without an explicit request.
+**The exclusivity index metric has been removed from the application.** There
+is no `exclusivity_index` key, configured table or query path. Do not
+reintroduce it without an explicit request.
+
+**Display names are separate from metric keys.** By request, `overall_index` is
+labelled **"Exclusivity index"** in `METRIC_LABELS`; the metric key, its
+BigQuery table, its column and the cache keys stay `overall_index`. Change one
+without the other only deliberately.
 
 **Segments are chosen one at a time** with a radio in the sidebar
 (`h3_analysis.mapping.segment_radio`) — no checkboxes, no "select all". Both
@@ -331,8 +336,8 @@ Before considering a change complete:
    (`H3_DATA_SOURCE=local`).
 3. Confirm every segment checkbox works on both pages.
 4. Confirm the metric radio switches between both index metrics
-   (Overall, Volume) on **both** pages, and that Exclusivity is offered
-   nowhere.
+   ("Exclusivity index" = `overall_index`, "Volume index" = `volume_index`) on
+   **both** pages, and that no third metric is offered.
 4b. Confirm the Page 1 two-hour slicer moves through all twelve periods and that
    the cell count/values change with it, and that Page 2 has no such slicer.
 5. Confirm the Page 2 day-part radio switches between all five day-parts and
